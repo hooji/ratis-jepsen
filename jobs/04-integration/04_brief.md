@@ -13,10 +13,9 @@ all merged there.
 Everything exists except the test itself. Job 01: the SUT
 (`sut/ratis-kv`, wire protocol PUT/CAS/GET, `--seed-bug stale-reads`).
 Job 02: the Docker topology (`env/run.sh up|down`, control + `n1..n7`,
-ssh, `validate.sh`) — note its `validate.sh` just had a revision merged
-(current-leadership semantics); a round-2 re-review is in flight, so if
-you see a small follow-up land on `validate.sh`, pull and continue —
-your job doesn't touch that file. Job 03: the harness core
+ssh, `validate.sh`) — final as of 2026-08-04 (round-2 re-review verdict
+MERGE; the current-leadership revision is on `main`). Job 03: the
+harness core
 (`harness/` — client with unit-tested outcome map, `db.clj` written to
 the §2.6 contract but never yet run against real containers,
 env-contract ns, CLI skeleton). **This job wires them together, makes

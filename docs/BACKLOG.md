@@ -32,3 +32,8 @@ coordinator turns these into jobs when their milestone arrives.*
    repo-root wrapper is provided; briefs/workflows must use the module
    path (Review 01 suggestion 3 resolved this way: no fragile root
    symlink).
+7. **Env hardening (Review 02 round-1 suggestions, 2026-08-04, all
+   non-blocking):** multi-cert `EXTRA_CA_B64` split; image/bundle size
+   pre-flight check; `trap`-based failure summary in `validate.sh`;
+   README note on the `maven-repo` volume lifecycle. Batch into an env
+   polish job before or alongside M1 CI wiring.
