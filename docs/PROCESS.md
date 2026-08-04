@@ -93,6 +93,14 @@ the owner's machine and uses `gh` directly.
   merge; non-trivial conflicts become a revision request.
 - Squash-merge for job PRs (one commit per job on `main`, report
   included); review PRs likewise.
+- **Round-2 fast path** (owner-approved 2026-08-04): when a revision is
+  mechanical, reviewer-prescribed, and carries a pre-specified
+  acceptance check, the coordinator may — at the owner's direction —
+  merge the worker PR while the round-2 re-review is still in flight.
+  The re-review still binds: a surprise REVISE triggers an immediate
+  fix-forward revision (or a revert if fix-forward is unsafe). Never
+  applies to first-round reviews; the worker branch is kept until the
+  verdict lands.
 - Run artifacts (`store/`, `target/`, caches) never enter PRs — see
   `.gitignore`; reference runs are summarized in `docs/RUNS.md`, not
   committed.
