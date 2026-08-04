@@ -43,18 +43,23 @@
 (defn cas [_ _] {:type :invoke, :f :cas,   :value [(rand-int value-range)
                                                    (rand-int value-range)]})
 
-(def threads-per-key
-  "Worker threads concurrently hammering one key (DESIGN 2.5 budget:
-  concurrency 10, all of it on the active key)."
-  10)
+(defn threads-per-key
+  "Worker threads per key: total concurrency spread across all keys, so
+  the keys run in parallel (concurrency 10 over 5 keys = 2 workers/key).
+  Keeping per-key concurrency low is what keeps knossos bounded: every
+  op a partition window crashes stays concurrent-forever in that key's
+  history, and the linear checker is exponential in those — piling all
+  ten workers onto one key at a time OOMed a reference run's analysis."
+  [{:keys [concurrency key-count]}]
+  (max 1 (quot concurrency key-count)))
 
 (defn generator
-  "The client-op generator: groups of threads-per-key workers walk
-  key-count independent keys, each key's history hard-capped at
-  ops-per-key ops, mixed r/w/cas at ~10 ops/s per worker."
-  [{:keys [key-count ops-per-key]}]
+  "The client-op generator: key-count independent keys checked in
+  parallel by groups of threads-per-key workers, each key's history
+  hard-capped at ops-per-key ops, mixed r/w/cas at ~10 ops/s per worker."
+  [{:keys [key-count ops-per-key] :as opts}]
   (independent/concurrent-generator
-    threads-per-key
+    (threads-per-key opts)
     (range key-count)
     (fn [_k]
       (->> (gen/mix [r w cas])
