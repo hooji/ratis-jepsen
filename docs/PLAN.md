@@ -204,25 +204,23 @@ constrain everything downstream and should be settled first.
 
 ### C. Environment
 
-- **Q7 — Docker vs LXC vs VMs; where do runs execute?** Largely settled
-  (2026-08-04): **Docker 5+1 compose, dual-target** — the same topology runs
-  on a dev machine and on **GitHub-hosted CI runners**, which is a proven
-  fit: sofa-jraft's jepsen.yml runs an identical-shaped 5-node sweep on
-  hosted runners (90-min timeout, artifacts uploaded, green runs
-  2026-06-15). Specifics adopted: one **matrix job per nemesis scenario**
-  (each scenario gets its own runner — parallel, isolated wall-clock; job
-  cap 6 h vs. our 10–30 min scenarios); privileged containers for iptables
-  partitions and SIGSTOP/kill (supported on hosted runners); checker memory
-  (Q10 history budget) is the binding resource, not the cluster. Known
-  caveats: (a) this repo is **private** → hosted-runner minutes are metered
-  and private-tier runners are the smaller spec — fine at manual-dispatch
-  cadence, with escape hatches in order: run sweeps locally, self-hosted
-  runner, or flip public when the upstream question is decided; (b) shared
-  runners have noisy scheduling — mitigated by the production config
-  profile's raised election timeouts (Q13); (c) **still open, the actual
-  spike: FUSE/`/dev/fuse` for lazyfs in privileged containers on hosted
-  runners** — 1-day spike before M4 is designed; if it fails, M4 alone
-  moves to a self-hosted/VM runner.
+- **Q7 — Docker vs LXC vs VMs; where do runs execute?** **Decided (owner,
+  2026-08-04): prefer CI.** GitHub-hosted runners are the primary executor;
+  local Docker is the dev loop, not the system of record. **The repo goes
+  public just before the first CI runs are wired up** (owner, 2026-08-04 —
+  i.e., at the start of M1), which makes hosted-runner minutes free from the
+  first workflow run and removes private-tier metering entirely; M0 is
+  built private/local. Shape: Docker compose topology
+  (control + node pool), one **matrix job per nemesis scenario** (each
+  scenario gets its own runner — parallel, isolated wall-clock; job cap 6 h
+  vs. our 10–30 min scenarios); privileged containers for iptables
+  partitions and SIGSTOP/kill (supported on hosted runners; proven at this
+  exact topology by sofa-jraft's jepsen.yml, green runs 2026-06-15);
+  checker memory (Q10 history budget) is the binding resource, not the
+  cluster. Noisy shared-runner scheduling is mitigated by the production
+  config profile's raised election timeouts (Q13). **Still open, gating M4
+  only: the FUSE/`/dev/fuse`-for-lazyfs spike** in privileged containers on
+  hosted runners; if it fails, M4 alone moves to a self-hosted/VM runner.
 - **Q8 — Dev-vs-CI architecture split.** Dev machines are Apple-silicon
   (arm64), GHA is x86_64. Ratis is pure Java so both work, but container
   images and any natives (lazyfs) must be dual-arch or CI-only. Leaning:
