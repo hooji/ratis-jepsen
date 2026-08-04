@@ -165,11 +165,11 @@ constrain everything downstream and should be settled first.
 ### A. Client architecture
 
 - **Q1 — Harness client: direct `RaftClient` interop or an HTTP/JSON shim in
-  the SUT?** Leaning: direct interop (tests the shipped client path, zero
-  shim code, relocated deps avoid classpath pain). Cost: outcome mapping is
-  against Ratis exception types, and harness JVM shares fate with client
-  bugs. A shim decouples but tests a client nobody ships. Decide first —
-  it shapes the SUT's entire surface.
+  the SUT?** **Decided (owner, 2026-08-04): direct interop** — tests the
+  shipped client path (retry cache, NotLeaderException failover, sliding
+  window), zero shim code, relocated deps avoid classpath pain. Accepted
+  cost: outcome mapping is against Ratis exception types, and the harness
+  JVM shares fate with client bugs.
 - **Q2 — Client identity model.** The retry cache keys on
   `(ClientId, callId)`. How do Jepsen worker processes map to `ClientId`s —
   one client per worker (natural; dedup scope per worker), or per-op clients
@@ -185,19 +185,18 @@ constrain everything downstream and should be settled first.
 
 ### B. System under test
 
-- **Q4 — State machine storage: in-memory or RocksDB?** Leaning: staged.
-  v1 = in-memory map + `FileListSnapshotInfo` file snapshots (isolates
-  Ratis; snapshots still real files). M-later = RocksDB-checkpoint state
-  machine, which doubles as the L3 rehearsal and makes install-snapshot
-  transfer multi-file/subdirectory-shaped like production. Confirm staging
-  or jump straight to RocksDB.
-- **Q5 — Bootstrap and membership superset.** With membership churn, nodes
-  enter/leave the conf. Do we pre-provision all N candidate nodes with
-  `GroupManagementApi.add` and swing `setConfiguration` across them (leaning),
-  or provision nodes on demand? Affects env topology (N=5 fixed vs N=7 pool)
-  and the orchestrator code the nemesis needs. Note: this nemesis *is* the
-  rehearsal of the L3 orchestrator's add-replace-dead-node flow — worth
-  designing with that reuse in mind.
+- **Q4 — State machine storage: in-memory or RocksDB?** **Decided (owner,
+  2026-08-04): staged** — v1 = in-memory map + `FileListSnapshotInfo` file
+  snapshots (isolates Ratis; snapshots still real files); a later milestone
+  swaps in the RocksDB-checkpoint state machine, which doubles as the L3
+  rehearsal and makes install-snapshot transfer
+  multi-file/subdirectory-shaped like production.
+- **Q5 — Bootstrap and membership superset.** **Decided (owner, 2026-08-04):
+  pre-provisioned pool** — provision all N candidate nodes with
+  `GroupManagementApi.add` and swing `setConfiguration` across them (env
+  topology becomes an N≈7 pool with a 5-voter conf). Design the
+  membership-churn nemesis explicitly as the rehearsal of the L3
+  orchestrator's add-replace-dead-node flow, with reuse in mind.
 - **Q6 — Read modes in scope.** Leader-linearizable + follower-linearizable
   in the main workload (leaning). Do we also run `sendReadOnlyNonLinearizable`
   / stale reads under a weaker (monotonic?) checker in v1, or defer? Leaning:
@@ -205,11 +204,25 @@ constrain everything downstream and should be settled first.
 
 ### C. Environment
 
-- **Q7 — Docker vs LXC vs VMs.** Leaning: Docker 5+1 compose (JRaft proves
-  GHA-viability; jepsen's docker tooling is maintained). Known costs:
-  `SIGSTOP`/`kill` fine, iptables partitions fine in privileged containers;
-  **lazyfs needs FUSE — verify privileged-container FUSE works in GHA or M4
-  moves to self-hosted/VM runners.** Answer with a 1-day spike, not debate.
+- **Q7 — Docker vs LXC vs VMs; where do runs execute?** Largely settled
+  (2026-08-04): **Docker 5+1 compose, dual-target** — the same topology runs
+  on a dev machine and on **GitHub-hosted CI runners**, which is a proven
+  fit: sofa-jraft's jepsen.yml runs an identical-shaped 5-node sweep on
+  hosted runners (90-min timeout, artifacts uploaded, green runs
+  2026-06-15). Specifics adopted: one **matrix job per nemesis scenario**
+  (each scenario gets its own runner — parallel, isolated wall-clock; job
+  cap 6 h vs. our 10–30 min scenarios); privileged containers for iptables
+  partitions and SIGSTOP/kill (supported on hosted runners); checker memory
+  (Q10 history budget) is the binding resource, not the cluster. Known
+  caveats: (a) this repo is **private** → hosted-runner minutes are metered
+  and private-tier runners are the smaller spec — fine at manual-dispatch
+  cadence, with escape hatches in order: run sweeps locally, self-hosted
+  runner, or flip public when the upstream question is decided; (b) shared
+  runners have noisy scheduling — mitigated by the production config
+  profile's raised election timeouts (Q13); (c) **still open, the actual
+  spike: FUSE/`/dev/fuse` for lazyfs in privileged containers on hosted
+  runners** — 1-day spike before M4 is designed; if it fails, M4 alone
+  moves to a self-hosted/VM runner.
 - **Q8 — Dev-vs-CI architecture split.** Dev machines are Apple-silicon
   (arm64), GHA is x86_64. Ratis is pure Java so both work, but container
   images and any natives (lazyfs) must be dual-arch or CI-only. Leaning:
@@ -267,12 +280,17 @@ constrain everything downstream and should be settled first.
 
 ## 7. Immediate next steps
 
-1. Settle **Q1, Q4, Q5, Q7** (the design-shaping four) — each is a short
-   written answer or a ≤1-day spike (Q7).
-2. Write `docs/DESIGN.md` for M0 against those answers: SUT command protocol,
-   state-machine sketch, harness namespaces, env topology.
-3. Build M0; demonstrate the seeded-bug catch; then revisit this plan against
-   reality and decide the upstream question with a working artifact in hand.
+*(updated 2026-08-04: Q1/Q4/Q5 decided; Q7 settled for M0–M3 — Docker 5+1,
+dual-target dev/GHA — with only the FUSE-for-lazyfs spike left open, gating
+M4 only.)*
+
+1. Write `docs/DESIGN.md` for M0 against the settled answers: SUT command
+   protocol, state-machine sketch, harness namespaces, env topology (N≈7
+   pool, 5-voter conf), per-scenario CI matrix shape.
+2. Build M0; demonstrate the seeded-bug catch.
+3. Before M4 design: the 1-day FUSE-in-GHA spike (Q7c).
+4. Then revisit this plan against reality and decide the upstream question
+   with a working artifact in hand.
 
 ## 8. References
 
