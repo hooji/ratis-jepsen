@@ -21,3 +21,6 @@ store/
 .idea/
 *.iml
 .vscode/
+
+# Job 02: env runtime state (generated ssh keys etc.) — never commit
+env/.state/
