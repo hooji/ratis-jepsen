@@ -1,0 +1,23 @@
+# Build outputs
+target/
+*.class
+*.jar
+*.tar.gz
+
+# Clojure
+.cpcache/
+.nrepl-port
+.lsp/
+.clj-kondo/.cache/
+
+# Jepsen run artifacts
+store/
+
+# Logs and OS noise
+*.log
+.DS_Store
+
+# IDE
+.idea/
+*.iml
+.vscode/
