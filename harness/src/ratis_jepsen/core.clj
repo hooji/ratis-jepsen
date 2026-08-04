@@ -60,8 +60,12 @@
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
+   ;; Default shrunk from the brief's 400 after a reference run's key
+   ;; history (400 ops with ~40 partition-:info) blew knossos's memory —
+   ;; the sanctioned lever ("if analysis exceeds the budget, shrink
+   ;; ops-per-key and say so"); DESIGN 2.5 pins only <=400.
    [nil "--ops-per-key NUMBER" "Hard cap on ops per key (the knossos budget)"
-    :default 400
+    :default 300
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 

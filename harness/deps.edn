@@ -34,8 +34,12 @@
 
  :aliases
  {;; Main entry: clojure -M:run test --help (jepsen.cli).
+  ;; Heap: knossos's linear checker is the run's binding resource (PLAN
+  ;; Q7); partition-window :info ops multiply its search space, and the
+  ;; JVM's ergonomic 25%-of-RAM default OOMed a reference run's analysis.
   :run
-  {:main-opts ["-m" "ratis-jepsen.core"]}
+  {:jvm-opts ["-Xmx10g"]
+   :main-opts ["-m" "ratis-jepsen.core"]}
 
   ;; Unit + in-JVM integration tests: clojure -M:test.
   ;; The SUT jar must be installed first:
