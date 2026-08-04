@@ -94,8 +94,17 @@ May be empty.
 
 When done: commit the report on your branch and, via your GitHub
 tooling, open a PR to `main` titled **`Review NN: MERGE`** or
-**`Review NN: REVISE`**, body linking the worker PR. Do not merge
-anything; the coordinator merges both PRs.
+**`Review NN: REVISE`**, body linking the worker PR — and then
+**merge your own review PR into `main` yourself** (squash), *provided
+it contains nothing but files under `reviews/<NN>-<slug>/`*. If your PR
+touches anything else, do not merge it — leave it open and say so in
+the PR body. Never merge the worker's PR; the coordinator does that
+after reading your verdict.
+
+If your session previously completed another review: treat each new
+assignment as a fresh start — fetch origin, base a new branch on
+current `main`, and re-read the brief chain (briefs change between
+rounds).
 
 For a re-review after revisions: write `<NN>_report_r1.md` (a fresh
 verdict over the delta plus spot-checks of previously-verified criteria)

@@ -14,7 +14,9 @@ built by a coordinated multi-agent process.
 
 ## Hard rules for all agents
 
-- Never push to `main` — only the coordinator merges.
+- Never push to `main` — only the coordinator merges. Sole exception:
+  reviewers squash-merge their own report-only review PR (see
+  `reviews/README.md`).
 - Stay on your auto-assigned branch; never push to anyone else's branch.
 - Stay inside your brief's declared file ownership.
 - Apache-2.0 headers on all new source files; no build/run artifacts in

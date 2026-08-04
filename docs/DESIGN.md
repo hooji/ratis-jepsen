@@ -227,6 +227,17 @@ exceptions before any cluster run trusts it.
   jepsen's rate plots plus the run wall-clock cap to notice a wedged
   cluster.
 
+## 2.6 Deployment contract (pinned 2026-08-04; env and harness both build to this)
+
+| Item | Value |
+|---|---|
+| Nodes | `n1..n7` (`n1..n5` initial voters; `n6`/`n7` dormant pool), user `root`, passwordless ssh from `control` |
+| Raft port | `6000` on every node |
+| Install dir | `/opt/ratis-kv` (tarball unpacked: `/opt/ratis-kv/bin/ratis-kv`, `/opt/ratis-kv/lib/`) |
+| Storage dir | `/var/lib/ratis-kv` |
+| Log | stdout captured to `/var/log/ratis-kv.log` |
+| Startup line | after `RaftServer.start()`, stdout emits `ratis-kv server started: id=<id> address=<host:port> storage=<dir> group=<uuid> peers=<list>` — the boot-await signal for env validation and `db.clj` (confirmed present at Job 01's merge; changing it is a breaking change requiring a brief) |
+
 ## 3. Environment — `env/`
 
 - One multi-arch image (arm64 dev / x86_64 CI): Debian base + OpenJDK 21 +

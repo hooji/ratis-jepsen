@@ -61,8 +61,10 @@ reviews/<NN>-<slug>/<NN>_report.md # review report (reviewer, in the review PR)
    verdict —
    **MERGE** or **REVISE** — plus justification, and opens a PR titled
    **`Review NN: <verdict>`**.
-6. **Merge.** Coordinator:
-   - always merges the review-report PR (both verdicts are audit trail);
+6. **Merge.** The reviewer squash-merges their *own* review-report PR
+   directly (allowed because it only adds files under
+   `reviews/<NN>-<slug>/` — if it touches anything else, it waits for
+   the coordinator). Then the coordinator:
    - on **MERGE**: squash-merges the worker PR into `main` as one commit
      (`Job NN: <title> (#<pr>)`), then updates any affected docs;
    - on **REVISE**: relays the reviewer's numbered revision list to the
@@ -82,8 +84,10 @@ the owner's machine and uses `gh` directly.
 
 ## Branch and merge rules
 
-- `main` is coordinator-merge-only by convention. Workers and reviewers
-  never push to `main` or to each other's branches.
+- `main` is coordinator-merge-only by convention, with one exception:
+  a reviewer squash-merges their own **report-only** review PR (files
+  under `reviews/<NN>-<slug>/` exclusively). Workers and reviewers
+  otherwise never push to `main` or to each other's branches.
 - Worker branches base on the `main` current at assignment. If `main`
   moves (another job merged), the coordinator handles trivial conflicts at
   merge; non-trivial conflicts become a revision request.

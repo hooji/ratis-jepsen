@@ -41,6 +41,11 @@ picture; the rules that bind *you* are below.
   branch.
 - You are on an auto-assigned branch based off `main`. Stay on it. Never
   push to `main` or any other branch.
+- If your session previously completed another job: treat each new
+  assignment as a fresh start — fetch origin, base your new branch on
+  **current** `main` (it has moved: your prior work merged, briefs were
+  added), and re-read the brief chain before assuming anything carried
+  over.
 - Commit incrementally with clear messages (the PR will be squash-merged;
   history hygiene inside the branch is for the reviewer's benefit).
 - When done: add your report (below), then open a PR to `main` titled
