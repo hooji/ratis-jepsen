@@ -14,22 +14,27 @@ Read, in order:
 ## Finding the work
 
 You are on your own auto-assigned branch based off `main` — which does
-**not** contain the worker's changes. Discover them via the open PR:
+**not** contain the worker's changes. You work in a Claude Code Cloud
+environment: discover the worker's PR through the **GitHub MCP server**
+tools available to you (there is no `gh` CLI):
+
+- List this repository's open pull requests; find the one titled
+  **`Job NN: ...`** matching your review brief.
+- From it, record the **head branch name** and read the PR description,
+  changed-file list, and full diff.
+
+To build and run the work, bring the worker's branch into your workspace
+**read-only** — never onto your own branch, and never pushing to theirs:
 
 ```bash
-gh pr list --state open          # find the PR titled "Job NN: ..."
-gh pr view <pr> --json title,headRefName,body
-gh pr diff <pr>                  # the full change
-```
-
-To build and run the work, check out the worker's branch **read-only in a
-separate worktree** — never on your own branch, and never push to theirs:
-
-```bash
-git fetch origin <headRefName>
+git fetch origin <head-branch-name>
 git worktree add ../job-NN-under-review FETCH_HEAD
 cd ../job-NN-under-review        # build/test here
 ```
+
+If `git worktree` is unavailable in your environment, fall back to
+inspecting files with `git show FETCH_HEAD:<path>` plus the PR diff, and
+say so in your report's verification notes.
 
 Your own branch receives exactly one artifact: your report.
 
@@ -87,9 +92,10 @@ May be empty.
   revisions list is the deliverable — vague REVISE reports get bounced
   back by the coordinator.
 
-When done: commit the report on your branch and open a PR to `main`
-titled **`Review NN: MERGE`** or **`Review NN: REVISE`**, body linking
-the worker PR. Do not merge anything; the coordinator merges both PRs.
+When done: commit the report on your branch and, via your GitHub
+tooling, open a PR to `main` titled **`Review NN: MERGE`** or
+**`Review NN: REVISE`**, body linking the worker PR. Do not merge
+anything; the coordinator merges both PRs.
 
 For a re-review after revisions: write `<NN>_report_r1.md` (a fresh
 verdict over the delta plus spot-checks of previously-verified criteria)

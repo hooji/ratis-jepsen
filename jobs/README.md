@@ -35,6 +35,10 @@ picture; the rules that bind *you* are below.
 
 ## Branch and PR mechanics
 
+- You work in a Claude Code Cloud environment: GitHub operations (such as
+  opening your PR) go through the **GitHub MCP server** tools available
+  to you; there is no `gh` CLI. Plain `git` handles commits on your
+  branch.
 - You are on an auto-assigned branch based off `main`. Stay on it. Never
   push to `main` or any other branch.
 - Commit incrementally with clear messages (the PR will be squash-merged;

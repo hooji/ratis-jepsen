@@ -42,18 +42,23 @@ reviews/<NN>-<slug>/<NN>_report.md # review report (reviewer, in the review PR)
 1. **Brief.** Coordinator writes `jobs/NN-slug/NN_brief.md` and pushes it
    directly to `main` (briefs, reviews/README, docs are coordinator-owned
    and merge without review).
-2. **Assignment.** Owner assigns the job to a worker session. The Claude
-   Code Desktop harness auto-assigns the branch name; the worker bases it
-   on current `main`.
+2. **Assignment.** When a brief is ready, the coordinator hands the owner
+   a kickoff prompt of the form
+   `Please look to jobs/NN-slug/NN_brief.md for your instructions.` —
+   the owner pastes it into a fresh worker session. The Claude Code
+   harness auto-assigns the branch name; the worker bases it on current
+   `main`.
 3. **Implementation.** Worker implements within the brief's declared file
    ownership, adds `NN_report.md`, opens a PR to `main` titled
    **`Job NN: <brief title>`**, and leaves it open.
 4. **Review brief.** Coordinator writes `reviews/NN-slug/NN_brief.md`
-   (usually short: pointer to the job brief + any review emphasis) and
-   pushes to `main`. Owner assigns a reviewer session.
+   (usually short: pointer to the job brief + any review emphasis),
+   pushes to `main`, and hands the owner the kickoff prompt
+   (`Please look to reviews/NN-slug/NN_brief.md for your instructions.`).
 5. **Review.** Reviewer, on their own auto-branch off `main`, discovers
-   the worker PR (`gh pr list`, title `Job NN:`), verifies independently
-   (see `reviews/README.md`), writes `NN_report.md` with a verdict —
+   the worker PR through their GitHub tooling (title `Job NN:`), verifies
+   independently (see `reviews/README.md`), writes `NN_report.md` with a
+   verdict —
    **MERGE** or **REVISE** — plus justification, and opens a PR titled
    **`Review NN: <verdict>`**.
 6. **Merge.** Coordinator:
@@ -65,6 +70,15 @@ reviews/<NN>-<slug>/<NN>_report.md # review report (reviewer, in the review PR)
      continues on the *same branch/PR*; the same reviewer re-reviews the
      delta. **After two REVISE rounds, stop: owner + coordinator decide**
      (re-scope, reassign, or coordinator documents an accepted exception).
+
+## Tooling note
+
+Worker and reviewer sessions run in **Claude Code Cloud** environments:
+GitHub operations (listing/inspecting/opening PRs) go through the
+**GitHub MCP server** tools available in those sessions — there is no
+`gh` CLI there. Plain `git` (fetch, worktree, show) is available for
+bringing branches into the workspace. The coordinator runs locally on
+the owner's machine and uses `gh` directly.
 
 ## Branch and merge rules
 
