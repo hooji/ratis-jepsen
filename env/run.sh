@@ -121,6 +121,30 @@ cmd_test() {
     'command -v git >/dev/null 2>&1 \
        || { printf "#!/bin/sh\nexit 1\n" > /usr/local/bin/git \
             && chmod +x /usr/local/bin/git; }'
+  # jepsen's iptables net wraps node commands in `sudo -k -S -u root
+  # bash -c ...`; the image has no sudo and ssh lands as root already, so
+  # give each node an exec stand-in that swallows sudo's flags and runs
+  # the command. Stdin is deliberately left untouched: jepsen's su path
+  # sends no password, and a blocking read would deadlock every wrapped
+  # command (sshj holds the channel's stdin open). Skipped where real
+  # sudo exists (/usr/bin), so it's a no-op once the image grows sudo.
+  local node
+  for node in "${NODES[@]}"; do
+    compose exec -T "${node}" bash -c '[ -x /usr/bin/sudo ] || {
+      cat > /usr/local/bin/sudo <<"SHIM"
+#!/bin/bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -u) shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *)  break ;;
+  esac
+done
+exec "$@"
+SHIM
+      chmod +x /usr/local/bin/sudo; }'
+  done
   # Run the harness on control against the five voters. store/ lands on
   # the bind mount (/ratis-jepsen/store — gitignored) so results survive
   # `down`. Remaining args pass through to the harness CLI (--nemesis,
