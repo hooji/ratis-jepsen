@@ -215,3 +215,75 @@ it is exempt.)
   cold path is several minutes; warm is seconds.
 - Consider pre-warming the Clojure deps cache in the image once Job 03's
   `deps.edn` exists (DESIGN 3 mentions a warmed cache for control).
+
+## Revision 1 (2026-08-04, per `jobs/02-env/02_revision_1.md`)
+
+**Item 1 of 1 — `validate.sh` check (b) now asserts *current* leadership,
+not election history.** Changes, all in `env/validate.sh` (plus one usage
+line in `env/README.md` and the script's header comment):
+
+- `count_leaders` now takes, per node, only the **last**
+  `changes role from` line in the log
+  (`grep 'changes role from' ${LOG_FILE} | tail -n 1`, via the new
+  `last_transition` helper) and counts the node iff that line contains
+  `to LEADER`. A superseded leader's later `LEADER to FOLLOWER` line
+  removes it from the census.
+- After the initial any-leader wait and the (kept) settle sleep, the
+  census is **re-sampled once per second until it reads exactly 1**,
+  bounded by the same `LEADER_DEADLINE` computed at the start of the
+  check; a mid-handover sample of 0 or 2 is not a failure. Only hitting
+  the deadline fails, and the failure path now prints every node's last
+  role-transition line as evidence.
+- The winning node's `to LEADER` line is still printed verbatim (now via
+  `... | tail -n 1`, so a re-elected cluster quotes the *current*
+  leadership line).
+
+**Verification — quiet baseline** (semantics unchanged for a calm
+cluster): full `validate.sh` run, exit 0:
+
+```
+validate: check (b): exactly one current leader (deadline 90s)
+validate:   [n3] ... n3@group-ABBC16E54704: changes role from CANDIDATE to LEADER at term 1 for changeToLeader
+validate: PASS (b): exactly one node (n3) is currently LEADER
+...
+validate: ALL CHECKS PASSED
+```
+
+**Verification — the reviewer's stall scenario** (`RJ_LEADER_SETTLE=25`;
+an orchestration script watched the validate output, found the current
+leader after `PASS (a)`, and ran
+`ssh root@<leader> 'kill -STOP $(cat /var/run/ratis-kv.pid); sleep 4; kill -CONT $(cat /var/run/ratis-kv.pid)'`
+during the settle window):
+
+```
+stall: pausing leader n1 for 4s (SIGSTOP/SIGCONT)
+stall: n1 resumed
+...
+validate: check (b): exactly one current leader (deadline 90s)
+validate:   [n5] 2026-08-04 15:35:05.621 [n5@group-ABBC16E54704-LeaderElection1] INFO org.apache.ratis.server.RaftServer$Division - n5@group-ABBC16E54704: changes role from CANDIDATE to LEADER at term 2 for changeToLeader
+validate: PASS (b): exactly one node (n5) is currently LEADER
+...
+validate: ALL CHECKS PASSED     (exit 0)
+```
+
+The logs confirm the scenario really exercised the new semantics — two
+`to LEADER` lines existed cluster-wide (the old check would have counted
+2 and failed a healthy cluster), and the paused leader's last line is a
+step-down:
+
+```
+[n1] changes role from CANDIDATE to LEADER at term 1 for changeToLeader
+[n1] changes role from    LEADER to FOLLOWER at term 1 for StepDownReason:LOST_MAJORITY_HEARTBEATS
+[n5] changes role from CANDIDATE to LEADER at term 2 for changeToLeader   (last line; the one counted)
+```
+
+**Known-gaps update.** The original entry "leader-uniqueness check can
+flake by design" is superseded by this revision: an early re-election no
+longer fails the run. The residual (much smaller) caveat is that a
+cluster still churning leaders at the *deadline* fails — which at that
+point is signal, not flake. One measurement artifact worth recording for
+whoever automates around `validate.sh`: while a paused process holds the
+pid, `kill -0` keeps succeeding, so a SIGSTOP that overlaps check (d)
+would stall the stop-wait until `kill -CONT` — not reachable in the
+committed flow (no pausing there), only in harnesses like the revision's
+own stall orchestration.

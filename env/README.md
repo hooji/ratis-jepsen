@@ -13,7 +13,8 @@ env/run.sh up        # build image (cached), start compose, wait for ssh on all 
 env/run.sh down      # stop and remove containers, network, volumes; idempotent
 env/run.sh test      # stub until Job 04 (exits 64)
 env/validate.sh      # end-to-end proof: SUT build on control, 5-node boot,
-                     # leader election, ports, clean SIGTERM stop
+                     # exactly one *current* leader (last role transition
+                     # per node), ports, clean SIGTERM stop
 ```
 
 Always drive the topology through `run.sh` (not bare `docker compose`):

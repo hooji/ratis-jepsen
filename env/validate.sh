@@ -19,7 +19,10 @@
 # 5-voter cluster on n1..n5 per the deployment contract (DESIGN 2.6), then
 # asserts:
 #   (a) the contract startup line appears in all five logs;
-#   (b) exactly one node's log shows a Ratis role change to LEADER;
+#   (b) exactly one node is *currently* leader: per node, only the last
+#       Ratis role-transition line counts, and it must be a transition to
+#       LEADER — election history (an early re-election) does not fail a
+#       healthy cluster;
 #   (c) port 6000 is listening on all five nodes;
 #   (d) SIGTERM stops all five servers cleanly.
 # Exits 0 only if every check holds, printing each check's evidence line.
@@ -115,13 +118,21 @@ for node in "${SERVERS[@]}"; do
 done
 say "PASS (a): startup line present on all five nodes"
 
-# --- (b) exactly one leader ------------------------------------------------
-say "check (b): exactly one LEADER role change (deadline ${LEADER_DEADLINE}s)"
+# --- (b) exactly one current leader ----------------------------------------
+say "check (b): exactly one current leader (deadline ${LEADER_DEADLINE}s)"
+# A node counts as leader iff the LAST role-transition line in its log is a
+# transition to LEADER — current leadership, not election history. A node
+# that lost leadership has a later 'LEADER to FOLLOWER' line and no longer
+# counts.
+last_transition() {
+  on_node "$1" "grep 'changes role from' ${LOG_FILE} 2>/dev/null | tail -n 1" \
+    || true
+}
 count_leaders() {
   LEADERS=()
   local node
   for node in "${SERVERS[@]}"; do
-    if on_node "${node}" "grep -q '${LEADER_PATTERN}' ${LOG_FILE} 2>/dev/null"; then
+    if [[ "$(last_transition "${node}")" == *"to LEADER"* ]]; then
       LEADERS+=("${node}")
     fi
   done
@@ -132,17 +143,28 @@ while :; do
   ((${#LEADERS[@]} > 0)) && break
   if ((SECONDS >= deadline)); then
     for node in "${SERVERS[@]}"; do dump_log_tail "${node}"; done
-    fail "(b) no LEADER role change observed within ${LEADER_DEADLINE}s"
+    fail "(b) no leader observed within ${LEADER_DEADLINE}s"
   fi
   sleep 1
 done
 sleep "${LEADER_SETTLE}"
-count_leaders
-((${#LEADERS[@]} == 1)) \
-  || fail "(b) expected exactly one leader, found ${#LEADERS[@]}: ${LEADERS[*]}"
+# Re-sample until the census reads exactly one: a sample taken mid-handover
+# may legitimately read 0 or 2; only the deadline makes that a failure.
+while :; do
+  count_leaders
+  ((${#LEADERS[@]} == 1)) && break
+  if ((SECONDS >= deadline)); then
+    for node in "${SERVERS[@]}"; do
+      say "  [${node}] last role transition: $(last_transition "${node}")"
+    done
+    fail "(b) expected exactly one current leader at the deadline," \
+         "found ${#LEADERS[@]}: ${LEADERS[*]:-none}"
+  fi
+  sleep 1
+done
 say "  [${LEADERS[0]}] $(on_node "${LEADERS[0]}" \
-  "grep -m1 '${LEADER_PATTERN}' ${LOG_FILE}")"
-say "PASS (b): exactly one node (${LEADERS[0]}) became LEADER"
+  "grep '${LEADER_PATTERN}' ${LOG_FILE} | tail -n 1")"
+say "PASS (b): exactly one node (${LEADERS[0]}) is currently LEADER"
 
 # --- (c) port 6000 listening on all five nodes -----------------------------
 say "check (c): port 6000 listening on all five nodes"
