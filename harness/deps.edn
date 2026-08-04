@@ -22,9 +22,15 @@
 
   ;; Ratis client stack at the evaluated pin (PLAN Q15). The harness talks
   ;; to the cluster via direct RaftClient interop (PLAN Q1); grpc is the
-  ;; client rpc transport the SUT speaks.
+  ;; client rpc transport the SUT speaks. metrics-default: the client
+  ;; references org.apache.ratis.metrics.RatisMetrics at runtime and
+  ;; MetricRegistries.global() service-loads an implementation whose
+  ;; absence is a hard ExceptionInInitializerError, not a no-op —
+  ;; ratis-client pulls neither transitively (both found the hard way in
+  ;; Job 04's first cluster runs).
   org.apache.ratis/ratis-client {:mvn/version "3.2.2"}
-  org.apache.ratis/ratis-grpc {:mvn/version "3.2.2"}}
+  org.apache.ratis/ratis-grpc {:mvn/version "3.2.2"}
+  org.apache.ratis/ratis-metrics-default {:mvn/version "3.2.2"}}
 
  :aliases
  {;; Main entry: clojure -M:run test --help (jepsen.cli).

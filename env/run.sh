@@ -104,12 +104,35 @@ cmd_down() {
 # subcommand plumbing; change only what is between the markers.
 # ---------------------------------------------------------------------------
 cmd_test() {
-  # BEGIN Job-04 stub
-  echo "ratis-jepsen: 'test' is a stub — the Jepsen harness arrives in Job 04." >&2
-  echo "Use '$0 up' / '$0 down' for the cluster, env/validate.sh for the" \
-       "environment proof." >&2
-  exit 64
-  # END Job-04 stub
+  # BEGIN Job-04 test body
+  # Ensure the SUT tarball exists (build inside control if absent); the
+  # repo is bind-mounted at /ratis-jepsen, so a host-built tarball counts.
+  if ! compose exec -T control bash -c \
+      "ls /ratis-jepsen/sut/ratis-kv/target/ratis-kv-*.tar.gz >/dev/null 2>&1"; then
+    echo "run.sh: no SUT tarball; building inside control"
+    compose exec -T control /ratis-jepsen/sut/ratis-kv/mvnw \
+      -f /ratis-jepsen/sut/ratis-kv/pom.xml -q package
+  fi
+  # jepsen's run! shells out to `git` for provenance logging and dies if
+  # the binary is missing outright (it handles nonzero exits fine); the
+  # image ships no git, so give control a benign always-fails stand-in.
+  # No-op once the image grows real git.
+  compose exec -T control bash -c \
+    'command -v git >/dev/null 2>&1 \
+       || { printf "#!/bin/sh\nexit 1\n" > /usr/local/bin/git \
+            && chmod +x /usr/local/bin/git; }'
+  # Run the harness on control against the five voters. store/ lands on
+  # the bind mount (/ratis-jepsen/store — gitignored) so results survive
+  # `down`. Remaining args pass through to the harness CLI (--nemesis,
+  # --time-limit, --seed-bug, ...). The harness exit code is the test
+  # verdict (0 = checker valid) and, via `set -e`, becomes ours.
+  compose exec -T control bash -c \
+    'cd /ratis-jepsen/harness && exec clojure -M:run test \
+       --store-dir /ratis-jepsen/store \
+       --nodes n1,n2,n3,n4,n5 \
+       --ssh-private-key /root/.ssh/id_ed25519 \
+       "$@"' harness-test "$@"
+  # END Job-04 test body
 }
 
 usage() {

@@ -74,11 +74,14 @@
 
 (defn server-args
   "argv for bin/ratis-kv on `node` (the process contract, DESIGN 1.2):
-  this node's id, the full fixed voter set, the contract storage dir."
-  [node]
-  ["--id" node
-   "--peers" (peers-spec env/initial-voters)
-   "--storage" env/storage-dir])
+  this node's id, the full fixed voter set, the contract storage dir —
+  plus the seeded-bug flag when the run asks for one (test-of-the-test
+  runs only; DESIGN 1.6)."
+  [node seed-bug]
+  (cond-> ["--id" node
+           "--peers" (peers-spec env/initial-voters)
+           "--storage" env/storage-dir]
+    seed-bug (conj "--seed-bug" seed-bug)))
 
 (defn select-tarball
   "Picks the SUT tarball from a seq of file names. Exactly one match is
@@ -152,7 +155,7 @@
   CLI, stdout+stderr appended to the contract log, pidfile. Returns
   :started or :already-running (pidfile-based check only — the launcher
   script execs java, so executable matching would misfire)."
-  [node]
+  [node seed-bug]
   (c/exec :mkdir :-p env/storage-dir)
   (apply cu/start-daemon!
          {:logfile env/log-file
@@ -160,7 +163,7 @@
           :chdir   env/install-dir
           :match-executable? false}
          env/bin-path
-         (server-args node)))
+         (server-args node seed-bug)))
 
 (defn kill!*
   "kill -9 by pidfile, then removes the pidfile. No-op if no pidfile."
@@ -176,7 +179,7 @@
 ;; Jepsen DB
 ;; ---------------------------------------------------------------------------
 
-(defrecord RatisKvDB []
+(defrecord RatisKvDB [seed-bug]
   jdb/DB
   (setup! [this test node]
     (install! (find-tarball!))
@@ -195,12 +198,15 @@
   ;; nemesis calls these.
   jdb/Kill
   (start! [_this _test node]
-    (start!* node))
+    (start!* node seed-bug))
 
   (kill! [_this _test _node]
     (kill!*)))
 
 (defn db
-  "The ratis-kv DB."
-  []
-  (RatisKvDB.))
+  "The ratis-kv DB; pass a seed-bug mode name (e.g. \"stale-reads\") to
+  start every node with that deliberately seeded SUT bug."
+  ([]
+   (db nil))
+  ([seed-bug]
+   (RatisKvDB. seed-bug)))
