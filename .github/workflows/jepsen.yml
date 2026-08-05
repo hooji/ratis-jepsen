@@ -27,6 +27,13 @@
 name: jepsen
 
 on:
+  # TEMPORARY bootstrap trigger, removed again before review (see the Job 06
+  # report): GitHub registers a workflow for API dispatch only once it has
+  # run at least once (or exists on the default branch); this branch-scoped
+  # push trigger provides that first run. The permanent trigger is
+  # workflow_dispatch ONLY — no cron, no push.
+  push:
+    branches: [claude/ci-env-polish-wbdv67]
   workflow_dispatch:
     inputs:
       scenarios:
@@ -56,19 +63,26 @@ jobs:
     timeout-minutes: 20
     outputs:
       scenarios: ${{ steps.parse.outputs.scenarios }}
+      time-limit: ${{ steps.parse.outputs.time-limit }}
     steps:
       # Validate inputs and turn the comma-list into a JSON array for the
       # test matrix. Blank entries are dropped, duplicates collapsed (a
       # duplicate scenario would collide on the store artifact name); an
-      # effectively empty list falls back to the documented default.
+      # effectively empty list falls back to the documented default, as
+      # does an empty time-limit — downstream jobs consume the normalized
+      # values from this job's outputs, never the raw inputs.
       - name: Parse the scenarios input
         id: parse
         env:
           SCENARIOS: ${{ inputs.scenarios }}
           TIME_LIMIT: ${{ inputs.time-limit }}
         run: |
+          if [ -z "${TIME_LIMIT}" ]; then
+            TIME_LIMIT=300
+            echo "time-limit input was empty; using the default (300)"
+          fi
           case "${TIME_LIMIT}" in
-            ''|*[!0-9]*)
+            *[!0-9]*)
               echo "::error::time-limit must be a positive integer, got '${TIME_LIMIT}'"
               exit 1 ;;
           esac
@@ -80,7 +94,8 @@ jobs:
             echo "scenarios input was empty; using the default"
           fi
           echo "scenarios=${list}" >> "${GITHUB_OUTPUT}"
-          echo "matrix scenarios: ${list}"
+          echo "time-limit=${TIME_LIMIT}" >> "${GITHUB_OUTPUT}"
+          echo "matrix scenarios: ${list}; time limit: ${TIME_LIMIT}s"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
@@ -126,7 +141,7 @@ jobs:
       - name: Run the harness (nemesis ${{ matrix.scenario }})
         env:
           SCENARIO: ${{ matrix.scenario }}
-          TIME_LIMIT: ${{ inputs.time-limit }}
+          TIME_LIMIT: ${{ needs.build-sut.outputs.time-limit }}
         run: env/run.sh test --nemesis "${SCENARIO}" --time-limit "${TIME_LIMIT}"
       # store/ is written by root inside the container; tar as root rather
       # than fight ownership on the runner.
