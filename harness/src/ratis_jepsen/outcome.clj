@@ -38,11 +38,12 @@
   | reply VAL v / ABSENT (read)                | —               | :ok   |
   | reply MISMATCH/ABSENT (cas)                | :fail (:error :precondition) | — |
   | reply ERR or wrong-shaped                  | :fail + loud (harness/SUT bug) | :fail + loud |
-  | NotLeaderException                         | :fail           | :fail |
-  | LeaderNotReadyException                    | :fail           | :fail |
-  | RaftRetryFailureException, null cause      | :fail           | :fail |
-  |   (the form NotLeader/LeaderNotReady actually takes under noRetry —
+  | NotLeaderException                         | :info           | :fail |
+  | LeaderNotReadyException                    | :info           | :fail |
+  | RaftRetryFailureException, null cause      | :info           | :fail |
+  |   (the form NotLeader/LeaderNotReady take on retry exhaustion —
   |    see below)                              |                 |       |
+  | RaftRetryFailureException, non-null cause  | :info           | :fail |
   | ResourceUnavailableException               | :fail           | :fail |
   | GroupMismatchException                     | :fail + loud (setup bug)   | same |
   | StateMachineException                      | :fail + loud (SUT bug in M0) | same |
@@ -53,26 +54,35 @@
   | AlreadyClosedException                     | :info           | :fail |
   | interrupt (InterruptedIOException/-Exception) | :info        | :fail |
   | harness-side timeout (j.u.c.TimeoutException) | :info        | :fail |
-  | unrecognized RaftException / RaftRetryFailureException with cause /
-  |   any other Throwable                      | :info + loud    | :fail + loud |
+  | unrecognized RaftException / any other Throwable | :info + loud | :fail + loud |
 
-  Why the RaftRetryFailureException(null cause) row exists — verified
-  against ratis-client 3.2.2 source (BlockingImpl.sendRequestWithRetry,
-  RaftClientImpl.handleLeaderException / noMoreRetries): when a reply
-  carries NotLeaderException or LeaderNotReadyException the client *nulls
-  the reply* instead of throwing, and on retry exhaustion with a null
-  throwable builds RaftRetryFailureException with a null cause. Every other
-  first-attempt failure is rethrown as the original exception
-  (noMoreRetries returns the cause as-is when attemptCount == 1 and the
-  throwable is non-null). So under our noRetry policy (DESIGN 2.3):
+  Why the leadership rows are ambiguous — DESIGN 2.4 as amended
+  2026-08-05 after Review 05's false-red discovery (see
+  reviews/05-nemesis-breadth/05_report.md for the full triage, verified
+  against ratis-client 3.2.2 source): a NotLeaderException reply is NOT
+  proof of non-application. A leader deposed mid-term completes its
+  appended-but-uncommitted pending requests with NotLeaderException on
+  the step-down path, and those entries — already in its log — can
+  replicate and commit under the successor's term. Grading that reply
+  \"definite :fail\" convicted a healthy cluster (knossos false-red in a
+  mixed-nemesis run: a write both graded not-applied and visible to
+  subsequent reads). So every leadership-shaped rejection of a write is
+  :info.
 
-  - NotLeader/LeaderNotReady replies surface as RaftRetryFailureException
-    with getCause() == null — a *definite* not-appended, hence :fail;
-  - a RaftRetryFailureException with a non-null cause cannot happen under
-    noRetry, and under a multi-attempt policy earlier attempts may have
-    applied even if the recorded (last) cause looks definite — hence
-    pessimism (:info for writes) plus a loud log, never recursion into the
-    cause.
+  The funnel mechanics (verified at 3.2.2, M0, and unchanged by the
+  amendment): when a reply carries NotLeaderException or
+  LeaderNotReadyException the client *nulls the reply* instead of
+  throwing, routes it through the retry policy, and on exhaustion with a
+  null throwable builds RaftRetryFailureException with a null cause —
+  that row is those exceptions' usual surface form. The client's bounded
+  same-callId retry policy (client.clj, DESIGN 2.3/Q3 as amended)
+  resolves most of these before exhaustion: retries re-send the same
+  (ClientId, callId), the server retry cache deduplicates, and an
+  appended-then-deposed write's retry returns the cached true success.
+  What remains after exhaustion is genuinely ambiguous. A non-null cause
+  means the last attempt died on a real error (timeout, transport) —
+  reachable and routine under a multi-attempt policy, and earlier
+  attempts may have applied: same ambiguity, cause preserved in :error.
 
   The direct NotLeaderException / LeaderNotReadyException rows are kept
   regardless: the classifier must not depend on which wrapping the library
@@ -208,10 +218,16 @@
   [op-kind ^Throwable t*]
   (let [t (unwrap t*)]
     (condp instance? t
-      ;; Definite not-appended / not-performed: the server (or the client
-      ;; before transmitting) definitively rejected the request pre-append.
-      NotLeaderException          (definite-fail :not-leader)
-      LeaderNotReadyException     (definite-fail :leader-not-ready)
+      ;; NotLeader/LeaderNotReady are NOT proof of non-application for the
+      ;; write path (DESIGN 2.4 as amended 2026-08-05, Review 05): a
+      ;; deposed leader completes appended-but-uncommitted pending
+      ;; requests with NotLeaderException, and those entries can commit
+      ;; under its successor. Ambiguous ⇒ :info for writes, :fail for
+      ;; reads (no side effect either way).
+      NotLeaderException          (ambiguous op-kind :not-leader)
+      LeaderNotReadyException     (ambiguous op-kind :leader-not-ready)
+
+      ;; Definite not-appended: admission control rejects pre-append.
       ResourceUnavailableException (definite-fail :resource-unavailable)
 
       ;; Definite, but also a bug in the test setup or the SUT — flag the
@@ -238,19 +254,20 @@
         (unknown-throwable op-kind t)
         (definite-fail :read-index))
 
-      ;; The noRetry funnel for NotLeader/LeaderNotReady replies (see ns
-      ;; docstring): null cause = definite not-appended. A non-null cause
-      ;; cannot happen under noRetry — pessimism, loudly.
+      ;; Retry exhaustion (see ns docstring). Null cause = the
+      ;; NotLeader/LeaderNotReady funnel: every attempt got a
+      ;; leadership-shaped rejection, but any of them may have reached a
+      ;; leader that appended before stepping down — ambiguous, exactly
+      ;; like the raw exceptions above. Non-null cause = the last attempt
+      ;; failed with a real error (timeout, transport); earlier attempts
+      ;; may have applied — ambiguous, with the cause preserved for
+      ;; diagnosis.
       RaftRetryFailureException
       (if (nil? (.getCause t))
-        (definite-fail :not-leader-or-not-ready)
+        (ambiguous op-kind :not-leader-or-not-ready)
         (ambiguous op-kind
                    [:retry-failure (str (.getName (class (.getCause t))) ": "
-                                        (.getMessage ^Throwable (.getCause t)))]
-                   (str "outcome map: RaftRetryFailureException with non-null "
-                        "cause under a policy expected to be noRetry — earlier "
-                        "attempts may have applied; classified pessimistically. "
-                        "Cause: " (.getCause t))))
+                                        (.getMessage ^Throwable (.getCause t)))]))
 
       ;; Ambiguous: the request may have reached the leader and applied.
       TimeoutIOException          (ambiguous op-kind :timeout)

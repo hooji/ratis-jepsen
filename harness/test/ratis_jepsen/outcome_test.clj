@@ -105,20 +105,32 @@
         (is (loud? v) (str kind " " reply))))))
 
 ;; ---------------------------------------------------------------------------
-;; Rows: definite-failure exceptions ⇒ :fail for writes and reads
+;; Rows: leadership-shaped rejections ⇒ :info for writes, :fail for reads
+;; (DESIGN 2.4 as amended 2026-08-05 after Review 05's false-red: a deposed
+;; leader completes appended writes with NotLeaderException and the entries
+;; can commit under its successor — never a definite write :fail)
 ;; ---------------------------------------------------------------------------
 
 (deftest row-not-leader
-  (let [{:keys [write cas read]} (classify-all not-leader)]
-    (is (= {:type :fail :error :not-leader} write))
-    (is (= {:type :fail :error :not-leader} cas))
-    (is (= {:type :fail :error :not-leader} read))))
+  (testing "write path: ambiguous — the entry may commit under the successor"
+    (is (= {:type :info :error :not-leader} (outcome/classify :write not-leader)))
+    (is (= {:type :info :error :not-leader} (outcome/classify :cas not-leader))))
+  (testing "read path: no side effect, the read simply did not happen"
+    (is (= {:type :fail :error :not-leader} (outcome/classify :read not-leader)))))
 
 (deftest row-leader-not-ready
-  (let [{:keys [write cas read]} (classify-all leader-not-ready)]
-    (is (= {:type :fail :error :leader-not-ready} write))
-    (is (= {:type :fail :error :leader-not-ready} cas))
-    (is (= {:type :fail :error :leader-not-ready} read))))
+  (testing "write path: ambiguous"
+    (is (= {:type :info :error :leader-not-ready}
+           (outcome/classify :write leader-not-ready)))
+    (is (= {:type :info :error :leader-not-ready}
+           (outcome/classify :cas leader-not-ready))))
+  (testing "read path: :fail"
+    (is (= {:type :fail :error :leader-not-ready}
+           (outcome/classify :read leader-not-ready)))))
+
+;; ---------------------------------------------------------------------------
+;; Rows: definite-failure exceptions ⇒ :fail for writes and reads
+;; ---------------------------------------------------------------------------
 
 (deftest row-resource-unavailable
   (let [{:keys [write cas read]} (classify-all (ResourceUnavailableException. "admission control"))]
@@ -202,29 +214,37 @@
         (is (loud? v) (str (class t)))))))
 
 ;; ---------------------------------------------------------------------------
-;; Rows forced by the noRetry client mechanics (see outcome ns docstring):
-;; RaftRetryFailureException
+;; Rows: RaftRetryFailureException — retry exhaustion (see outcome ns
+;; docstring; the null-cause form is how NotLeader/LeaderNotReady surface
+;; through the client's bounded retry funnel)
 ;; ---------------------------------------------------------------------------
 
 (deftest row-retry-failure-null-cause
-  (testing "null cause = the NotLeader/LeaderNotReady funnel ⇒ definite :fail"
-    (let [t (RaftRetryFailureException. a-request 1 (RetryPolicies/noRetry) nil)]
-      (doseq [kind outcome/op-kinds]
-        (let [v (outcome/classify kind t)]
-          (is (= {:type :fail :error :not-leader-or-not-ready} v)
-              (str kind)))))))
+  (let [t (RaftRetryFailureException. a-request 4 (RetryPolicies/noRetry) nil)]
+    (testing "write path: every attempt was leadership-rejected, but any of
+              them may have been appended by a leader deposed before
+              acking ⇒ :info"
+      (is (= {:type :info :error :not-leader-or-not-ready}
+             (outcome/classify :write t)))
+      (is (= {:type :info :error :not-leader-or-not-ready}
+             (outcome/classify :cas t))))
+    (testing "read path: :fail"
+      (is (= {:type :fail :error :not-leader-or-not-ready}
+             (outcome/classify :read t))))))
 
 (deftest row-retry-failure-with-cause
-  (testing "non-null cause cannot happen under noRetry ⇒ pessimism + loud"
-    (let [t (RaftRetryFailureException. a-request 3 (RetryPolicies/noRetry)
+  (testing "non-null cause = last attempt died on a real error; earlier
+            attempts may have applied ⇒ quiet ambiguity, cause preserved"
+    (let [t (RaftRetryFailureException. a-request 4 (RetryPolicies/noRetry)
                                         (TimeoutIOException. "attempt timed out"))]
       (doseq [kind [:write :cas]]
         (let [v (outcome/classify kind t)]
           (is (= :info (:type v)) (str kind))
-          (is (loud? v) (str kind))))
+          (is (not (loud? v)) (str kind))
+          (is (= :retry-failure (first (:error v))) (str kind))))
       (let [v (outcome/classify :read t)]
         (is (= :fail (:type v)))
-        (is (loud? v))))))
+        (is (not (loud? v)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Structural properties
@@ -270,13 +290,13 @@
 (deftest unwraps-future-wrappers
   (testing "ExecutionException/CompletionException from the harness future
             are unwrapped before dispatch"
-    (is (= {:type :fail :error :not-leader}
+    (is (= {:type :info :error :not-leader}
            (outcome/classify :write (ExecutionException. not-leader))))
     (is (= {:type :info :error :timeout}
            (outcome/classify :write
                              (CompletionException.
                                (TimeoutIOException. "rpc timeout")))))
-    (is (= {:type :fail :error :not-leader}
+    (is (= {:type :info :error :not-leader}
            (outcome/classify :write
                              (ExecutionException.
                                (CompletionException. not-leader)))))))
