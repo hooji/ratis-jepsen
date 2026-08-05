@@ -404,3 +404,64 @@ decision, not an elle integration.
              :linearizable-keys? true}
             (->elle-history ops)))
 ```
+
+---
+
+# Revision 1 (2026-08-05, after Review 05 — verdict REVISE)
+
+Executed the reviewer's Required revisions 1–5 exactly as written
+(`reviews/05-nemesis-breadth/05_report.md`), under the coordinator's
+relay notes in `05_revision_1.md`: the DESIGN §2.4 / PLAN Q3 amendment
+was **ratified before this revision landed**, so the changes below
+implement current design; the history is recorded under "Deviations,
+revised" anyway, as asked.
+
+## The defect being fixed (reviewer's discovery, summarized)
+
+My original `mixed` gate run was green, but the reviewer's 300 s
+reproduction produced a **false-red**: knossos convicted keys 0, 2, 3 of
+a healthy un-seeded cluster (their preserved store:
+`ratis-kv-register-mixed/20260805T061642.433Z`, review environment).
+Root cause — Job 03's outcome map, exposed by Job 05's fault schedule:
+writes completed with `NotLeaderException` were graded *definite*
+`:fail`, but a leader deposed by a partition-heal election completes its
+appended-but-uncommitted pending writes with NLE, and those entries can
+replicate and commit under the successor. The harness wrote itself an
+impossible history; knossos rightly convicted it.
+
+## What changed (revisions 1–3)
+
+| File | Change |
+|---|---|
+| `harness/src/ratis_jepsen/client.clj` | `RetryPolicies/noRetry` → `retryUpToMaximumCountWithFixedSleep(4, 200 ms)` — bounded **same-callId** retries. Soundness (reviewer's, verified against ratis-client 3.2.2, cited in the docstring): `BlockingImpl.send` captures the callId once and rebuilds the same request per attempt, the server retry cache deduplicates, so a step-down-committed write's retry returns the cached success; no double-apply. Fast-fail retries cost ~0.8 s, under the 5 s harness deadline; slow attempts run into that deadline and stay `:info`. |
+| `harness/src/ratis_jepsen/outcome.clj` | Write-path `NotLeaderException`, `LeaderNotReadyException`, and null-cause `RaftRetryFailureException` → **`:info`** (reads stay `:fail` — no side effect). Non-null-cause `RaftRetryFailureException` (exhausted retries over a real error — now reachable and routine) keeps `:info` but drops the loud log; its "cannot happen under noRetry" premise is gone. ns docstring table + rationale rewritten, citing the review. |
+| `harness/test/ratis_jepsen/outcome_test.clj` | Explicit write-vs-read cases for all amended rows (`row-not-leader`, `row-leader-not-ready`, `row-retry-failure-null-cause`, `row-retry-failure-with-cause` — the last asserting *quiet* ambiguity + preserved cause); wrapper-unwrap expectations updated. |
+
+## How the revision was verified
+
+### Unit suite
+
+```
+$ cd harness && clojure -M:test
+Ran 53 tests containing 624 assertions.
+0 failures, 0 errors.        (exit 0)
+```
+
+### Gate re-runs on the revised code (revision 4)
+
+<!-- REV MATRIX TABLE -->
+
+## Deviations, revised
+
+The retry-policy/outcome change **supersedes original PLAN Q3
+(`noRetry`) and the DESIGN §2.4 "NotLeaderException → :fail (definite)"
+row**. History: adopted M0 (Job 03) → false-red discovered and
+root-caused by Review 05 → amendment ratified by the coordinator
+(DESIGN §2.4 and PLAN Q3 now carry the amended text) → implemented here.
+One judgment call beyond the reviewer's literal items: the
+non-null-cause `RaftRetryFailureException` row's **loud log is dropped**
+(not just its verdict kept `:info`) — under a bounded policy that row is
+the routine surface form of exhausted retries over real errors (e.g.
+connection-refused to a killed node), and a loud-log-per-op during every
+crash window would bury genuine triage signals; the cause still travels
+in `:error [:retry-failure …]`.
