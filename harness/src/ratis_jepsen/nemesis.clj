@@ -946,11 +946,28 @@
   "One membership cycle with the move drawn at random: add | remove |
   replace-dead. Legality is the nemesis's problem at invocation time —
   an illegal draw (band edge, empty pool) records a skip and the run
-  moves on, which keeps the voter count oscillating inside the 5±2 band."
+  moves on. Used by mixed-all, where membership is one fault kind among
+  six and any single move is fine; the DEDICATED membership generators
+  use membership-move-blocks instead — see there for why."
   [cycles]
   ((rand-nth [member-add-segment member-remove-segment
               member-replace-segment])
    cycles))
+
+(defn membership-move-blocks
+  "An endless stream of membership segment-fns in which every
+  consecutive block of three contains add, remove and replace-dead
+  exactly once, in shuffled order. Guaranteed per-run coverage by
+  construction: a plain uniform draw can starve a move for an entire
+  300 s run (observed live — the first membership shakedown drew 15
+  segments with zero adds, ratcheting the conf to the floor), and both
+  the acceptance gates and the combined kind's joiner-install evidence
+  NEED committed adds. A block also nets a voter change of zero
+  (+1 −1 ±0), which keeps the count oscillating inside the 5±2 band
+  instead of drifting."
+  []
+  (mapcat shuffle (repeat [member-add-segment member-remove-segment
+                           member-replace-segment])))
 
 (def listener-probe-script
   "The bounded listener-staging probe (brief deliverable 4), scripted
@@ -980,18 +997,26 @@
                         [partition-segment crash-segment pause-segment]))
 
 (defn membership-generator
-  "An endless stream of membership segments, the move re-drawn each
-  cycle (a frozen (cycle …) would repeat one draw forever)."
+  "An endless stream of membership segments drawn from
+  membership-move-blocks: order random, every block of three covers all
+  three moves."
   [cycles]
-  (apply concat (repeatedly #(membership-segment cycles))))
+  (mapcat #(% cycles) (membership-move-blocks)))
 
 (defn membership-churn-generator
-  "The combined kind (brief deliverable 3's second half): membership and
-  snapshot-churn segments interleaved uniformly — joins land behind
-  forced snapshots and purges, so a joining node's staged catch-up must
-  go through install-snapshot."
+  "The combined kind (brief deliverable 3's second half): snapshot-churn
+  and membership segments in strict alternation, CHURN FIRST — the
+  opening churn cycle forces a snapshot before the first join, and a
+  bootstrapping (staged) follower is sent a real install whenever the
+  leader holds any snapshot (LogAppender.shouldInstallSnapshot rule 3
+  at 3.2.2), so joins land on the
+  bootstrap-catch-up-via-install-snapshot path from the first add
+  onward. Membership moves come from membership-move-blocks (guaranteed
+  add coverage — the joiner-install evidence needs committed adds)."
   [cycles]
-  (interleave-generator cycles [membership-segment churn-segment]))
+  (mapcat (fn [segment-fn] (concat (churn-segment cycles)
+                                   (segment-fn cycles)))
+          (membership-move-blocks)))
 
 (defn mixed-all-generator
   "Everything the harness has: the M1 three plus snapshot churn,

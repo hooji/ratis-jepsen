@@ -268,22 +268,33 @@
   (let [segments (split-segments
                    (take 200 (nemesis/membership-generator default-cycles))
                    membership-segment-shapes)]
-    (testing "an endless stream of membership segments, all three moves
-              re-drawn per cycle (~75 draws; P[missing one] < 1e-10)"
+    (testing "an endless stream of membership segments"
       (is (<= 60 (count segments)))
-      (is (= membership-segment-shapes (set segments))))))
+      (is (= membership-segment-shapes (set segments))))
+    (testing "guaranteed coverage: every consecutive block of three
+              segments contains each move exactly once (a uniform draw
+              starved adds for a whole live run — never again by
+              construction)"
+      (doseq [block (partition 3 segments)]
+        (is (= membership-segment-shapes (set block)))))))
 
-(deftest membership-churn-generator-draws-both-kinds
+(deftest membership-churn-generator-alternates-churn-first
   (let [known    (conj membership-segment-shapes churn-segment-shape)
         segments (split-segments
                    (take 300 (nemesis/membership-churn-generator
                                default-cycles))
                    known)]
-    (testing "the combined kind interleaves membership moves with whole
-              snapshot-churn cycles"
+    (testing "strict alternation, churn first: the opening churn cycle
+              forces a snapshot before the first join can commit, which
+              puts every join on the install-snapshot bootstrap path"
       (is (<= 40 (count segments)))
-      (is (some #(= churn-segment-shape %) segments))
-      (is (some membership-segment-shapes segments)))))
+      (is (= churn-segment-shape (first segments)))
+      (doseq [[c m] (partition 2 segments)]
+        (is (= churn-segment-shape c))
+        (is (contains? membership-segment-shapes m))))
+    (testing "the membership half still covers all three moves"
+      (is (= membership-segment-shapes
+             (set (remove #(= churn-segment-shape %) segments)))))))
 
 (deftest listener-probe-script-shape
   (testing "the probe is finite and scripted: add, census, promote,
