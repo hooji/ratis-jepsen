@@ -56,9 +56,15 @@
     (is (= ["--id" "n3"
             "--peers" "n1=n1:6000,n2=n2:6000,n3=n3:6000,n4=n4:6000,n5=n5:6000"
             "--storage" "/var/lib/ratis-kv"]
-           (db/server-args "n3"))))
+           (db/server-args "n3" nil))))
+  (testing "a seeded-bug run appends the flag (and only then)"
+    (is (= ["--id" "n1"
+            "--peers" "n1=n1:6000,n2=n2:6000,n3=n3:6000,n4=n4:6000,n5=n5:6000"
+            "--storage" "/var/lib/ratis-kv"
+            "--seed-bug" "stale-reads"]
+           (db/server-args "n1" "stale-reads"))))
   (testing "every voter gets the identical peers value"
-    (is (apply = (map #(nth (db/server-args %) 3) env/initial-voters)))))
+    (is (apply = (map #(nth (db/server-args % nil) 3) env/initial-voters)))))
 
 (deftest tarball-selection
   (testing "exactly one match"

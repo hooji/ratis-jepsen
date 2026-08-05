@@ -15,34 +15,108 @@
 (ns ratis-jepsen.core
   "CLI entry and test-map assembly (DESIGN 2.1).
 
-  Job 03 stage: the real db + client + outcome map wired into a runnable
-  jepsen test with no workload (:generator nil) and a noop nemesis —
-  Job 04 brings the register workload, generators, checkers and the
-  partition nemesis. `clojure -M:run test --help` shows usage."
+  M0 shape: the register workload over independent keys, an optional
+  random-halves partition nemesis on a 15/15 s cycle, knossos
+  linearizability checking per key. `clojure -M:run test --help` for the
+  options; the interesting ones:
+
+    --workload register        (the only workload until M2/M3)
+    --nemesis none|partition   fault schedule (default none)
+    --time-limit 300           wall-clock ceiling; the op budget usually
+                               exhausts first
+    --key-count 5 --ops-per-key 400 --concurrency 10   the DESIGN 2.5
+                               knossos budget
+    --seed-bug stale-reads     start every node with the SUT's seeded bug
+                               (the red-run lever; testing the harness)
+    --store-dir DIR            where jepsen's store/ output lands"
   (:require [jepsen.cli :as cli]
-            [jepsen.nemesis :as nemesis]
+            [jepsen.generator :as gen]
+            [jepsen.store :as store]
             [jepsen.tests :as tests]
             [ratis-jepsen.client :as client]
-            [ratis-jepsen.db :as db]))
+            [ratis-jepsen.db :as db]
+            [ratis-jepsen.nemesis :as nemesis]
+            [ratis-jepsen.workload.register :as register]))
+
+(def workloads
+  "Workload name -> (fn [opts] {:generator, :checker}). M3 adds the
+  increment workload here."
+  {"register" register/workload})
+
+(def cli-opts
+  "Additional CLI options, merged over jepsen's test-opt-spec (same
+  option string = replaces jepsen's entry, which is how --concurrency
+  and --time-limit get M0-budget defaults)."
+  [[nil "--workload NAME" "Workload to run"
+    :default "register"
+    :validate [workloads (cli/one-of workloads)]]
+
+   [nil "--nemesis NAME" "Fault schedule during the run"
+    :default "none"
+    :validate [nemesis/kinds (cli/one-of nemesis/kinds)]]
+
+   [nil "--key-count NUMBER" "How many independent register keys to run through"
+    :default 5
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   ;; Default shrunk from the brief's 400 after a reference run's key
+   ;; history (400 ops with ~40 partition-:info) blew knossos's memory —
+   ;; the sanctioned lever ("if analysis exceeds the budget, shrink
+   ;; ops-per-key and say so"); DESIGN 2.5 pins only <=400.
+   [nil "--ops-per-key NUMBER" "Hard cap on ops per key (the knossos budget)"
+    :default 300
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--seed-bug MODE" "Start every node with a deliberately seeded SUT bug (stale-reads). Testing the harness only — a run with this flag is expected to FAIL its checker."
+    :validate [#{"stale-reads"} "Must be: stale-reads"]]
+
+   [nil "--store-dir DIR" "Directory jepsen writes its store/ results under"
+    :default "store"]
+
+   ;; Overrides of jepsen defaults for the DESIGN 2.5 budget; option
+   ;; strings must match jepsen's exactly for merge-opt-specs to replace.
+   [nil "--concurrency NUMBER" "How many workers should we run? Must be an integer, optionally followed by n (e.g. 3n) to multiply by the number of nodes."
+    :default "10"
+    :validate [(partial re-find #"^\d+n?$")
+               "Must be an integer, optionally followed by n."]]
+
+   [nil "--time-limit SECONDS"
+    "Excluding setup and teardown, how long should a test run for, in seconds?"
+    :default 300
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]])
 
 (defn ratis-test
-  "Builds the test map from parsed CLI options. Note jepsen's default
-  --nodes (n1..n5) equals the deployment contract's initial voters; the
-  db and client construct the raft group from the contract regardless."
+  "Builds the test map from parsed CLI options: register workload +
+  chosen nemesis over the db/client/outcome stack from Job 03."
   [opts]
-  (merge tests/noop-test
-         opts
-         {:name      "ratis-kv"
-          :db        (db/db)
-          :client    (client/client)
-          :nemesis   nemesis/noop
-          ;; Workload stub — Job 04 owns generators and checkers.
-          :generator nil}))
+  ;; jepsen.store writes under its base-dir var; point it wherever the
+  ;; caller asked (env/run.sh test passes /ratis-jepsen/store so results
+  ;; land on the bind mount outside the container).
+  (alter-var-root #'store/base-dir (constantly (:store-dir opts)))
+  (let [workload ((workloads (:workload opts)) opts)
+        nem      (nemesis/package (:nemesis opts))]
+    (merge tests/noop-test
+           opts
+           {:name      (str "ratis-kv-" (:workload opts)
+                            "-" (:nemesis opts)
+                            (when (:seed-bug opts)
+                              (str "-seedbug-" (:seed-bug opts))))
+            :db        (db/db (:seed-bug opts))
+            :client    (client/client)
+            :nemesis   (:nemesis nem)
+            :checker   (:checker workload)
+            :generator (->> (:generator workload)
+                            (gen/nemesis (:generator nem))
+                            (gen/time-limit (:time-limit opts)))})))
 
 (defn -main
   [& args]
   ;; :usage passed as a string — jepsen 0.3.13's default hands the
   ;; test-usage fn itself to the printer, which renders as #object[...].
-  (cli/run! (cli/single-test-cmd {:test-fn ratis-test
-                                  :usage   (cli/test-usage)})
+  (cli/run! (cli/single-test-cmd {:test-fn  ratis-test
+                                  :opt-spec cli-opts
+                                  :usage    (cli/test-usage)})
             args))
