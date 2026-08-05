@@ -42,6 +42,20 @@ constraint. Headers, artifacts, report completeness.
    written on a clean checkout; every claim (M0 status, commands,
    badge target) must be currently true.
 
+## Known issue on `main` (do not re-triage)
+
+Review 05 discovered an intermittent **false-red** in the outcome map
+that ships on current `main` (writes graded `:fail` on
+NotLeaderException can actually have committed via a deposed leader's
+surviving entries). It reproduces ~1-in-3 under `mixed`; it is *rare
+but possible* under plain `partition`. The fix is in flight on Job
+05's PR. If one of your `partition` runs convicts the cluster: check
+for that signature (convicted key's history shows a `:fail
+:not-leader-or-not-ready` write of the "impossible" value) and, if it
+matches, record it as the known issue — it is not a Job 06 defect and
+must not drive your verdict. Reference:
+`reviews/05-nemesis-breadth/05_report.md`.
+
 ## Probe (≥1)
 
 Dispatch with a bogus scenario name (`--scenarios "none,typo"`) — the

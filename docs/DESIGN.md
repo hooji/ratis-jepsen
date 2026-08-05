@@ -176,10 +176,17 @@ ratis-jepsen.nemesis    ; M0: stock partitioner; custom nemeses land M2
 
 - `open!`: one `RaftClient` per Jepsen worker process —
   `RaftClient.newBuilder().setProperties(...).setRaftGroup(GROUP)
-  .setRetryPolicy(RetryPolicies.noRetry()).build()`. One worker = one
-  `ClientId` = one callId stream (Q2); the register workload uses
-  **`noRetry()`** so every ambiguity surfaces as `:info` rather than being
-  laundered by the library (Q3). (M3's increment workload deliberately runs
+  .setRetryPolicy(...).build()`. One worker = one
+  `ClientId` = one callId stream (Q2). **Retry policy (amended
+  2026-08-05, ratifying Review 05): bounded fixed-sleep same-callId
+  retries (4 × 200 ms), not `noRetry()`** — a deposed leader's appended
+  entries can commit under its successor while the client receives
+  NotLeaderException, so NLE is not proof of non-application and the
+  original design let the harness convict healthy clusters. Same-callId
+  retries are deduplicated by the server retry cache, so a
+  step-down-committed write's retry returns the cached true outcome;
+  only the exhausted residual is `:info` (Q3, as amended in PLAN).
+  (M3's increment workload deliberately runs
   a *second* client config with bounded retries — the retry cache is its
   subject.)
 - `invoke!`: ops map 1:1 to §1.4 messages. Reads use leader-routed
@@ -199,8 +206,8 @@ ambiguous. Initial table (types verified at 3.2.2):
 | Outcome from client | Register write (`PUT`/`CAS`) | Read (`GET`) |
 |---|---|---|
 | reply `isSuccess` | `:ok` (CAS `MISMATCH`/`ABSENT` payload ⇒ `:fail` with `:error :precondition` — the *op* failed, definitively, by design) | `:ok` |
-| `NotLeaderException` | `:fail` (definite; not appended) | `:fail` |
-| `LeaderNotReadyException` | `:fail` | `:fail` |
+| `NotLeaderException` | **`:info`** (amended 2026-08-05: a deposed leader may have appended the entry and it can commit under the successor — Review 05; retries usually resolve this before it surfaces) | `:fail` |
+| `LeaderNotReadyException` | **`:info`** (same amendment) | `:fail` |
 | `ResourceUnavailableException` | `:fail` (admission control rejects pre-append) | `:fail` |
 | `GroupMismatchException` | `:fail` + flag run (setup bug, not SUT bug) | same |
 | `StateMachineException` | `:fail` in M0 (our SM never throws from apply; reaching this = SUT bug ⇒ also flag) | `:fail` |

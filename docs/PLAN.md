@@ -182,10 +182,16 @@ constrain everything downstream and should be settled first.
   same ClientId only if we persist it — decide whether client-restart
   simulation is in scope.
 - **Q3 — Retry policy inside the harness.** Jepsen wants raw outcomes; the
-  library's default is retry-forever. Leaning: `noRetry()` (or 1-attempt) for
-  the register workload so `:info` means exactly "indeterminate"; the
-  increment workload *deliberately* uses bounded retries because retry-cache
-  behavior is its test subject. Needs a per-workload client-config mechanism.
+  library's default is retry-forever. Originally decided: `noRetry()` for
+  the register workload. **Amended 2026-08-05 (Review 05 discovery):
+  bounded fixed-sleep same-callId retries** — `noRetry()` proved unsound,
+  because NotLeaderException from a deposed leader is not proof of
+  non-application (appended entries can commit under the successor), and
+  grading it `:fail` produced a reproducible false-red on a healthy
+  cluster. Same-callId retries are deduplicated by the server retry cache,
+  so they convert that ambiguity into the cached true outcome; the
+  exhausted residual is graded `:info`. The increment workload still gets
+  its own client config (retry-cache behavior is its test subject).
 
 ### B. System under test
 
