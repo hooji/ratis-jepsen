@@ -27,13 +27,6 @@
 name: jepsen
 
 on:
-  # TEMPORARY bootstrap trigger, removed again before review (see the Job 06
-  # report): GitHub registers a workflow for API dispatch only once it has
-  # run at least once (or exists on the default branch); this branch-scoped
-  # push trigger provides that first run. The permanent trigger is
-  # workflow_dispatch ONLY — no cron, no push.
-  push:
-    branches: [claude/ci-env-polish-wbdv67]
   workflow_dispatch:
     inputs:
       scenarios:
