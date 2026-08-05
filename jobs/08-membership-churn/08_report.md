@@ -9,14 +9,34 @@ kill → remove-from-conf → add-pool-node → wipe-and-restart-as-pool
 sequence) over the 7-node topology, and a new conf-change evidence
 checker fails any dedicated membership run whose node logs carry fewer
 than N committed configuration changes. The SUT grew the anticipated
-`--join` launcher mode (the only `sut/**` change, itemized below):
-start a `RaftServer` with **no group** — the `GroupManagementBaseTest`
-"null group" precedent — and the harness bootstraps it via
-`GroupManagementApi.add` with the *empty-peers* group before
-`setConfiguration` commits it into the conf; the same flag is also the
-correct *restart* mode for any dynamically-joined node, because the
-3.2.2 proxy recovers stored groups by scanning the storage dir. Two
-decisions to look hardest at: (1) all `setConfiguration` calls go
+`--join` launcher mode: start a `RaftServer` with **no group** — the
+`GroupManagementBaseTest` "null group" precedent — and the harness
+bootstraps it via `GroupManagementApi.add` with the *empty-peers*
+group before `setConfiguration` commits it into the conf; the same
+flag is also the correct *restart* mode for any dynamically-joined
+node, because the 3.2.2 proxy recovers stored groups by scanning the
+storage dir.
+
+**The central event of this job is a conviction, caught by the
+evidence-assertion law on its first combined run** (details in "The
+find"): at ratis-3.2.2, a state machine built on `BaseStateMachine`
+without a custom `pause()` gets its **division killed by every live
+streamed snapshot install** — `BaseStateMachine.pause()` is an empty
+method, the install path pauses the SM and
+`StateMachineUpdater.reload()` hard-asserts the PAUSED lifecycle state,
+and the assert failure's catch-all closes the division. A staged
+joiner self-destructed 25 ms after logging `successfully install the
+entire snapshot`, the leader's `setConfiguration` then wedged ~60 s in
+staging NOPROGRESS while refusing every other conf change and
+leadership transfer, and the combined gate's `:no-joiner-install-evidence`
+verdict is what dragged the whole chain into the light. The SUT fix
+(lifecycle discipline exactly as upstream's own test state machine
+does it) is itemized below; the conviction stores are preserved; this
+also retroactively explains Job 07's "ServerNotReadyException
+install-retry storm" (BACKLOG item 7) — the leader was hammering
+installs into a division the *previous* install had just killed.
+
+Decisions to look hardest at: (1) all `setConfiguration` calls go
 through the `Arguments` builder in `COMPARE_AND_SET` mode against a
 **log-line conf census** — the API alternative
 (`GroupInfoReply.getConf()`) is **dropped by the 3.2.2 wire
@@ -51,9 +71,11 @@ nets a voter change of zero.
 | `docs/RUNS.md` | M2 part-2 ledger entries |
 | `jobs/08-membership-churn/08_report.md` | this report |
 
-## The SUT `--join` diff (brief: "keep it minimal and separately described")
+## The SUT diff (brief: "keep it minimal and separately described")
 
-Main-source diff is **two files, ~40 lines of code**:
+Main-source diff is **three files**, in two independent pieces:
+
+**Piece 1 — the anticipated `--join` mode (~40 lines):**
 
 1. `ServerOptions`: one new flag (`--join`) parsed into one new record
    component; nothing else touched. `--id` must still appear in
@@ -63,6 +85,16 @@ Main-source diff is **two files, ~40 lines of code**:
    set (it defaults to null — first-class at 3.2.2). Everything else —
    production properties, `RECOVER`, state machine, ports — is
    identical. `main` additionally logs one `ratis-kv join mode:` line.
+
+**Piece 2 — the lifecycle fix this job's conviction forced (~30
+lines, `KvStateMachine` only):** `initialize` wraps its existing body
+in `LifeCycle.startAndTransition` (SM ends RUNNING), `pause()`
+transitions PAUSING→PAUSED, `reinitialize()` resumes
+PAUSED→STARTING→RUNNING after its existing snapshot load. No behavior
+change on any path except the one that previously killed the division
+(see "The find"); without it, acceptance criterion 3 (combined run
+with install evidence on a joining node) is unsatisfiable at 3.2.2 —
+the joiner dies on the very install the criterion demands.
 
 Verified semantics (ratis-3.2.2 source, confirmed live):
 group-less start + empty storage ⇒ the proxy hosts nothing and awaits
@@ -141,6 +173,83 @@ Two 3.2.2 realities shaped this:
    node logs (deduplicated across replicas and restarts), with
    `--membership-min-conf-changes` (default 2) as the floor and
    `:no-conf-change-evidence` as the distinct failure.
+
+## The find: live installs kill the receiving division at 3.2.2 (read this second)
+
+The brief's Note said membership + snapshot churn is where the real
+bugs cluster; the first combined run proved it, and the
+evidence-assertion law is what caught it.
+
+**The observable**: the first `membership-snapshot-churn` gate exited 1
+with `:joiner-install-evidence {:valid? false, :error
+:no-joiner-install-evidence}` — three nodes had joined during the run
+and none showed an install-snapshot receive. Linearizability, liveness
+and conf-change evidence were all green; the run failed *only* because
+the path it exists to prove never completed. Store preserved:
+`…membership-snapshot-churn/20260805T214003.673Z`.
+
+**The chain, from that store's logs** (all line references verbatim in
+the store; timestamps 21:44:09–21:45:12):
+
+1. Leader n6 stages joiner n4 (`startSetConfiguration` cid=1672,
+   21:44:09.762) and — per `shouldInstallSnapshot` rule 3 for
+   bootstrapping followers — streams it a snapshot immediately.
+2. n4 installs it cleanly: `SnapshotManager - Installed snapshot`,
+   `snapshotIndex: updateIncreasingly -1 -> 1729`, `successfully
+   install the entire snapshot-1729` (21:44:09.834).
+3. **25 ms earlier, n4's updater thread had already died**:
+   `StateMachineUpdater caught a Throwable —
+   java.lang.IllegalStateException at
+   Preconditions.assertTrue(StateMachineUpdater.reload:230)`, and the
+   updater's catch-all ran `server.close()` — the division logs
+   `shutdown` and every subsequent leader append fails
+   `ServerNotReadyException: … current state is CLOSING`.
+4. The leader keeps appending into the corpse (`Decrease nextIndex to
+   1730` bounce at 21:45:12 — 63 s later), staging can never observe
+   catch-up, every other `setConfiguration` in the window is refused
+   `ReconfigurationInProgressException` and a leadership transfer is
+   refused `when raft reconfiguration in progress`, until the staging
+   dies `ReconfigurationTimeoutException … due to NOPROGRESS`.
+
+**Root cause, pinned in ratis-3.2.2 source**: `reload()` asserts
+`stateMachine.getLifeCycleState() == PAUSED`
+(`StateMachineUpdater.java:230`); the install path calls `sm.pause()`
+first (`ServerState.installSnapshot:476`) — but
+`BaseStateMachine.pause()` is an **empty method** that never touches
+the lifecycle, and PAUSING's only legal predecessor is RUNNING, which
+`BaseStateMachine.initialize` also never enters. Upstream's own test
+state machine (`SimpleStateMachine4Testing`) overrides `pause()` with
+the PAUSING→PAUSED transitions and resumes in `reinitialize()` — which
+is exactly why upstream's install tests pass while every naive
+`BaseStateMachine` user's division dies on first live install. The
+same crash is on the second install receiver in the same store (n5,
+21:42:54) — twice in one 300 s run.
+
+**Blast radius before the fix**: bounded but real — the process
+survives (only the division closes), a later `kill -9` + restart
+resurrects the division from disk, and the 4-of-5 majority keeps
+serving, which is why Job 07's snapshot-churn runs stayed green while
+(in hindsight) every live install was killing its receiver. It also
+re-frames Job 07's ~400/15.6 s `ServerNotReadyException` install-retry
+storm (BACKLOG item 7): the leader was retrying installs into a
+division the previous install had just closed — the no-backoff loop
+and the division-suicide are two faces of the same event.
+
+**The fix** (SUT, itemized in the diff section): `KvStateMachine` now
+does the lifecycle bookkeeping upstream's test SM does — RUNNING after
+`initialize` (via `LifeCycle.startAndTransition`), PAUSING→PAUSED in
+`pause()`, PAUSED→STARTING→RUNNING after the post-install
+`reinitialize()` — and `KvStateMachineLifecycleTest` pins the exact
+pause→reinitialize contract `reload()` enforces, through a real
+server. The re-run gates below all executed on the fixed SUT.
+
+**Upstream-report candidate** (with RATIS-2542's own wishlist naming
+`notifyInstallSnapshot` correctness): either `BaseStateMachine` should
+implement the lifecycle contract its own updater enforces, or
+`reload()` should fail the install (not the division) on a non-PAUSED
+SM. Repro recipe: any `BaseStateMachine`-derived SM without a `pause()`
+override + any leader-streamed install; 100% reproduction observed
+(2/2 receivers in one run).
 
 ## Liveness gating assessment (brief deliverable 5)
 
