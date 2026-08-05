@@ -35,7 +35,7 @@
     (is (= (count nemesis/fault-fs)
            (count (set (vals nemesis/fault->heal))))))
   (testing "action fs act without gating: disjoint from faults and heals"
-    (is (= #{:churn-snapshot :transfer} nemesis/action-fs))
+    (is (= #{:churn-transfer :churn-snapshot :transfer} nemesis/action-fs))
     (is (empty? (set/intersection nemesis/action-fs
                                   (set/union nemesis/fault-fs
                                              nemesis/heal-fs))))))
@@ -126,9 +126,11 @@
 (def churn-segment-shape
   [{:type :sleep, :value 15}
    {:type :info, :f :churn-kill}
+   {:type :sleep, :value 2}
+   {:type :info, :f :churn-transfer}
    {:type :sleep, :value 5}
    {:type :info, :f :churn-snapshot}
-   {:type :sleep, :value 5}
+   {:type :sleep, :value 3}
    {:type :info, :f :churn-restart}])
 
 (def transfer-segment-shape
@@ -136,20 +138,24 @@
    {:type :info, :f :transfer}])
 
 (deftest m2-segment-shapes
-  (testing "churn: calm, kill, writes window, snapshot, gap, restart"
+  (testing "churn: calm, kill, transfer (term bump), writes window,
+            snapshot, gap, restart"
     (is (= churn-segment-shape (nemesis/churn-segment default-cycles))))
   (testing "transfer: calm, one transfer attempt"
     (is (= transfer-segment-shape (nemesis/transfer-segment default-cycles))))
   (testing "churn cadence is configurable"
     (is (= [{:type :sleep, :value 30}
             {:type :info, :f :churn-kill}
+            {:type :sleep, :value 4}
+            {:type :info, :f :churn-transfer}
             {:type :sleep, :value 8}
             {:type :info, :f :churn-snapshot}
             {:type :sleep, :value 2}
             {:type :info, :f :churn-restart}]
            (nemesis/churn-segment
              (nemesis/cycles {:churn-calm-s 30
-                              :churn-kill-to-snapshot-s 8
+                              :churn-kill-to-transfer-s 4
+                              :churn-transfer-to-snapshot-s 8
                               :churn-snapshot-to-restart-s 2}))))
     (is (= {:type :sleep, :value 45}
            (first (nemesis/transfer-segment
@@ -193,7 +199,7 @@
 (deftest package-m2-kinds
   (testing "snapshot-churn and transfer cycle their segments"
     (is (= churn-segment-shape
-           (take 6 (:generator (nemesis/package "snapshot-churn")))))
+           (take 8 (:generator (nemesis/package "snapshot-churn")))))
     (is (= transfer-segment-shape
            (take 2 (:generator (nemesis/package "transfer"))))))
   (testing "mixed-all: an infinite stream"

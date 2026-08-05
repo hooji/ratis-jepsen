@@ -264,3 +264,44 @@
       (let [v (checker/evidence-verdict false none)]
         (is (true? (:valid? v)))
         (is (some? (:note v)))))))
+
+(def observed-send-line
+  "Verbatim from the Job 07 shakedown (store …snapshot-churn/20260805T171416.540Z, n5)."
+  (str "2026-08-05 17:15:21.901 [n5@group-ABBC16E54704->n2-GrpcLogAppender-"
+       "LogAppenderDaemon] INFO org.apache.ratis.grpc.server.GrpcLogAppender"
+       " - n5@group-ABBC16E54704->n2-GrpcLogAppender: followerNextIndex = "
+       "1048 but logStartIndex = 1103, send snapshot SingleFileSnapshotInfo"
+       "(t:4, i:1239):[/var/lib/ratis-kv/724d1912-848e-4e0f-a7e0-abbc16e547"
+       "04/sm/snapshot.4_1239] to follower"))
+
+(def observed-receive-line
+  "Verbatim from the same run (n2)."
+  (str "2026-08-05 17:15:26.968 [grpc-default-executor-5] INFO "
+       "org.apache.ratis.server.impl.SnapshotInstallationHandler - "
+       "n2@group-ABBC16E54704: receive installSnapshot: n5->n2#0-t4,"
+       "chunk:240a2bc3-5401-4e5f-b1de-0123456789ab,0"))
+
+(deftest install-snapshot-evidence-counting
+  (testing "observed real lines match; unrelated lines do not"
+    (let [logs {"n5" (str "boot line\n" observed-send-line "\n"
+                          observed-send-line "\nother line\n")
+                "n2" (str observed-receive-line "\n"
+                          "2026-08-05 17:15:22.0 INFO ... - n2: changes "
+                          "role from FOLLOWER to CANDIDATE at term 5\n")
+                "n1" "nothing relevant\n"
+                "n3" nil}   ; a node with no collected log
+          {:keys [total counts]}
+          (checker/count-install-evidence
+            logs checker/install-snapshot-patterns)]
+      (is (= 3 total))
+      (is (= {:send 2 :receive 0} (get counts "n5")))
+      (is (= {:send 0 :receive 1} (get counts "n2")))
+      (is (= {:send 0 :receive 0} (get counts "n1")))
+      (is (= {:send 0 :receive 0} (get counts "n3")))))
+  (testing "the zero-evidence fixture that must convict a churn run"
+    (let [logs {"n1" "plain raft chatter\n" "n2" "" "n3" nil}
+          ev   (checker/count-install-evidence
+                 logs checker/install-snapshot-patterns)]
+      (is (zero? (:total ev)))
+      (is (= :no-install-snapshot-evidence
+             (:error (checker/evidence-verdict true ev)))))))

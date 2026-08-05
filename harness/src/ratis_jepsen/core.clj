@@ -95,8 +95,13 @@
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
-   [nil "--churn-kill-to-snapshot-s SECONDS" "Snapshot-churn cycle: writes window between the kill and the snapshot trigger"
-    :default (:kill-to-snapshot-s nemesis/default-churn-cycle)
+   [nil "--churn-kill-to-transfer-s SECONDS" "Snapshot-churn cycle: gap between the kill and the leadership transfer (the term bump that makes the purge real)"
+    :default (:kill-to-transfer-s nemesis/default-churn-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--churn-transfer-to-snapshot-s SECONDS" "Snapshot-churn cycle: writes window between the transfer and the snapshot trigger"
+    :default (:transfer-to-snapshot-s nemesis/default-churn-cycle)
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
@@ -113,6 +118,11 @@
    [nil "--reads MODE" "Where linearizable reads are sent: leader (sendReadOnly, M0 behavior), follower (sendReadOnly to a non-leader peer), or mixed (50/50)"
     :default "leader"
     :validate [#{"leader" "follower" "mixed"} "Must be: leader, follower or mixed"]]
+
+   [nil "--rate OPS-PER-SECOND" "Approximate ops per second per worker (default 10, the M0 behavior). Snapshot-churn runs lower this so writes keep flowing across the whole run instead of exhausting the op budget early."
+    :default 10.0
+    :parse-fn #(Double/parseDouble %)
+    :validate [pos? "Must be positive"]]
 
    [nil "--key-count NUMBER" "How many independent register keys to run through"
     :default 5

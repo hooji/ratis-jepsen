@@ -58,14 +58,17 @@
 (defn generator
   "The client-op generator: key-count independent keys checked in
   parallel by groups of threads-per-key workers, each key's history
-  hard-capped at ops-per-key ops, mixed r/w/cas at ~10 ops/s per worker."
-  [{:keys [key-count ops-per-key] :as opts}]
+  hard-capped at ops-per-key ops, mixed r/w/cas at ~:rate ops/s per
+  worker (default 10 — the M0 behavior; snapshot-churn runs slow this
+  down so the write stream outlives the purge-gap milestones instead of
+  exhausting the op budget in the first seconds)."
+  [{:keys [key-count ops-per-key rate] :as opts}]
   (independent/concurrent-generator
     (threads-per-key opts)
     (range key-count)
     (fn [_k]
       (->> (gen/mix [r w cas])
-           (gen/stagger 1/10)
+           (gen/stagger (/ 1.0 (or rate 10)))
            ;; THE hard cap (DESIGN 6: "hard-cap in the generator, not in
            ;; prose") — bounds each per-key history knossos must check.
            (gen/limit ops-per-key)))))
@@ -96,11 +99,14 @@
                                                 :algorithm :linear})
                                              :timeline (timeline/html)}))
                            :liveness   (rj-checker/liveness)
-                           ;; Owed only when the history actually carries
-                           ;; snapshot-churn ops; other schedules pass
-                           ;; with a note (the checker gates itself).
+                           ;; Counts always reported; REQUIRED (zero ⇒
+                           ;; invalid) only for dedicated snapshot-churn
+                           ;; runs, whose write stream is sized to cross
+                           ;; the purge-gap milestones.
                            :install-snapshot-evidence
-                           (rj-checker/install-snapshot-evidence)
+                           (rj-checker/install-snapshot-evidence
+                             {:require-evidence?
+                              (= "snapshot-churn" (:nemesis opts))})
                            :stats      (checker/stats)
                            :exceptions (checker/unhandled-exceptions)}
                     gnuplot? (assoc :perf (checker/perf))))}))

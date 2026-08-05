@@ -26,13 +26,27 @@
     :pause / :resume       SIGSTOP a random minority, SIGCONT
     :churn-kill / :churn-restart
                            snapshot churn's fault pair: kill one follower,
-                           later restart it — with a :churn-snapshot in
-                           between (below) its only recovery path is
-                           install-snapshot
-    :churn-snapshot        ACTION, not a fault: ask every live server to
-                           snapshot now (SnapshotManagementApi), which with
-                           purge.upto.snapshot.index=true purges logs past
-                           the dead follower
+                           later restart it — after the two actions below
+                           its only recovery path is install-snapshot
+    :churn-transfer        ACTION inside the churn cycle: transfer
+                           leadership to a live non-leader. The term bump
+                           is what makes the purge REAL: segments only
+                           roll at 8 MB (unreachable here) or on a term
+                           change (SegmentedRaftLog.appendEntryImpl), and
+                           purge drops closed segments only
+                           (SegmentedRaftLogCache.purge) — without this
+                           step the whole run lives in one open segment,
+                           nothing purges, and the dead follower catches
+                           up from the log instead of install-snapshot
+                           (observed live; source-verified at 3.2.2)
+    :churn-snapshot        ACTION: ask every live server to snapshot now
+                           (SnapshotManagementApi), which with
+                           purge.upto.snapshot.index=true purges the
+                           now-closed old-term segments past the dead
+                           follower (subject to purge.gap = 1024: cycles
+                           less than ~1024 indexes after the last purge
+                           skip it and catch up from the log — several
+                           cycles per run do purge)
     :transfer              ACTION, not a fault: AdminApi.transferLeadership
                            to a random voter; a refused/timed-out handover
                            is a legal recorded outcome
@@ -78,7 +92,7 @@
 (def action-fs
   "Nemesis ops that act on the cluster without opening a fault window:
   they never enter fault->heal and the liveness checker ignores them."
-  #{:churn-snapshot :transfer})
+  #{:churn-transfer :churn-snapshot :transfer})
 
 ;; ---------------------------------------------------------------------------
 ;; Cycles (seconds). Calm first: runs open with a calm window (Job 04
@@ -100,11 +114,14 @@
   {:calm-s 25 :fault-s 5})
 
 (def default-churn-cycle
-  "Snapshot churn: calm 15 s; kill a follower; 5 s of writes landing in
-  the log it is missing; snapshot every live server (purging those
-  entries); 5 s more; restart it — install-snapshot is now its only way
-  back."
-  {:calm-s 15 :kill-to-snapshot-s 5 :snapshot-to-restart-s 5})
+  "Snapshot churn: calm 15 s; kill a follower; 2 s later transfer
+  leadership (the term bump closes every log's open segment); 5 s of
+  writes landing in the new term; snapshot every live server (purging
+  the closed old-term segments the dead follower still needs); 3 s
+  more; restart it — install-snapshot is now its only way back on
+  purge cycles."
+  {:calm-s 15 :kill-to-transfer-s 2 :transfer-to-snapshot-s 5
+   :snapshot-to-restart-s 3})
 
 (def default-transfer-cycle
   "Leadership transfer: one transfer to a random voter every 20 s."
@@ -120,9 +137,12 @@
    :pause     {:calm-s  (:pause-calm-s opts (:calm-s default-pause-cycle))
                :fault-s (:pause-fault-s opts (:fault-s default-pause-cycle))}
    :churn     {:calm-s (:churn-calm-s opts (:calm-s default-churn-cycle))
-               :kill-to-snapshot-s
-               (:churn-kill-to-snapshot-s opts
-                (:kill-to-snapshot-s default-churn-cycle))
+               :kill-to-transfer-s
+               (:churn-kill-to-transfer-s opts
+                (:kill-to-transfer-s default-churn-cycle))
+               :transfer-to-snapshot-s
+               (:churn-transfer-to-snapshot-s opts
+                (:transfer-to-snapshot-s default-churn-cycle))
                :snapshot-to-restart-s
                (:churn-snapshot-to-restart-s opts
                 (:snapshot-to-restart-s default-churn-cycle))}
@@ -273,6 +293,32 @@
                    (c/on-nodes test [target]
                                (fn [t node] (jdb/kill! (:db t) t node)))))
 
+          ;; The term bump that closes every open log segment: hand
+          ;; leadership to a live node that is not the dead follower and
+          ;; not the current leader — a transfer to the sitting leader
+          ;; succeeds WITHOUT changing terms, which silently defeats the
+          ;; purge (observed in shakedown: the admin client's
+          ;; getLeaderId is null before its first request, so the log
+          ;; census is the primary exclusion and getLeaderId the
+          ;; fallback).
+          :churn-transfer
+          (let [^RaftClient c @admin
+                leaders (set (concat (try (db/current-leaders! test)
+                                          (catch Exception e
+                                            (log/warn "churn-transfer census"
+                                                      "failed:" (.getMessage e))
+                                            []))
+                                     (some-> (.getLeaderId c) str vector)))
+                cands  (or (seq (remove (conj leaders @killed) (:nodes test)))
+                           (remove #{@killed} (:nodes test)))
+                target (rand-nth (vec cands))]
+            (assoc op :value
+                   {:target target
+                    :result (try (client/transfer-leadership! c target)
+                                 (catch Throwable t
+                                   [:error (.getName (class t))
+                                    (.getMessage t)]))}))
+
           :churn-snapshot
           (let [live (remove #{@killed} (:nodes test))]
             (assoc op :value
@@ -334,7 +380,8 @@
   (jn/compose {#{:start :stop}    (jn/partition-random-halves)
                #{:crash :restart} (crash-nemesis)
                #{:pause :resume}  (pause-nemesis)
-               #{:churn-kill :churn-snapshot :churn-restart} (churn-nemesis)
+               #{:churn-kill :churn-transfer :churn-snapshot :churn-restart}
+               (churn-nemesis)
                #{:transfer}       (transfer-nemesis)}))
 
 ;; ---------------------------------------------------------------------------
@@ -357,16 +404,21 @@
 (defn pause-segment     [cycles] (segment :pause (:pause cycles)))
 
 (defn churn-segment
-  "One snapshot-churn cycle: calm, kill a follower, let writes land in
-  the log it is missing, snapshot-and-purge every live server, wait,
-  restart it (install-snapshot is now its only recovery), and the next
-  segment's calm gives the install time to complete."
+  "One snapshot-churn cycle: calm; kill a follower; transfer leadership
+  (term bump — closes every open log segment, see the ns docstring);
+  let writes land in the new term; snapshot-and-purge every live
+  server; restart the follower (on purge cycles install-snapshot is now
+  its only recovery); the next segment's calm gives the install time to
+  complete."
   [cycles]
-  (let [{:keys [calm-s kill-to-snapshot-s snapshot-to-restart-s]}
+  (let [{:keys [calm-s kill-to-transfer-s transfer-to-snapshot-s
+                snapshot-to-restart-s]}
         (:churn cycles)]
     [(gen/sleep calm-s)
      {:type :info, :f :churn-kill}
-     (gen/sleep kill-to-snapshot-s)
+     (gen/sleep kill-to-transfer-s)
+     {:type :info, :f :churn-transfer}
+     (gen/sleep transfer-to-snapshot-s)
      {:type :info, :f :churn-snapshot}
      (gen/sleep snapshot-to-restart-s)
      {:type :info, :f :churn-restart}]))
