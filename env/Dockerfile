@@ -72,11 +72,18 @@ RUN curl -fsSL \
 
 # sshd: root may log in with a key only (the compose network is private and
 # throwaway; keys are generated per-checkout by run.sh, never committed).
+# StrictModes off because authorized_keys is a read-only bind mount owned by
+# whatever uid owns the checkout on the host — root locally, but e.g. 1001
+# on GitHub-hosted runners, where sshd's ownership check would refuse the
+# key ("bad ownership or modes") and every node would sit unreachable until
+# the ssh-ready timeout. The check defends multi-user machines; inside this
+# single-purpose container it defends nothing.
 RUN mkdir -p /root/.ssh /run/sshd \
     && chmod 700 /root/.ssh \
     && printf '%s\n' \
          'PermitRootLogin prohibit-password' \
          'UseDNS no' \
+         'StrictModes no' \
          > /etc/ssh/sshd_config.d/90-ratis-jepsen.conf
 
 # Client-side ssh config for control: no host-key prompts inside the
