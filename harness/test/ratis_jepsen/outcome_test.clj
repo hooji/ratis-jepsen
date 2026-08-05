@@ -194,13 +194,32 @@
 ;; Row: unknown Throwable ⇒ :info for writes (pessimism) + loud; reads :fail
 ;; ---------------------------------------------------------------------------
 
+;; ---------------------------------------------------------------------------
+;; Row: LeaderSteppingDownException (M2, reached by leadership transfers)
+;; ---------------------------------------------------------------------------
+
+(deftest row-leader-stepping-down
+  (let [t (org.apache.ratis.protocol.exceptions.LeaderSteppingDownException.
+            "n2 is stepping down")]
+    (testing "write path: definite :fail — thrown only by the pre-append
+              admission check (RaftServerImpl.checkLeaderState); the
+              request was never appended"
+      (is (= {:type :fail :error :leader-stepping-down}
+             (outcome/classify :write t)))
+      (is (= {:type :fail :error :leader-stepping-down}
+             (outcome/classify :cas t))))
+    (testing "read path: guarded impossible (isReadOnly skips the check)
+              ⇒ pessimism + loud"
+      (let [v (outcome/classify :read t)]
+        (is (= :fail (:type v)))
+        (is (loud? v))))))
+
 (deftest row-unknown-throwable
   (doseq [t [(RuntimeException. "surprise")
              (IllegalStateException. "unexpected state")
              (AssertionError. "assert")
              ;; An unrecognized RaftException subtype must land here too,
              ;; not in the quiet generic-IO row.
-             (org.apache.ratis.protocol.exceptions.LeaderSteppingDownException. "stepping down")
              (org.apache.ratis.protocol.exceptions.NotReplicatedException.
                1 org.apache.ratis.proto.RaftProtos$ReplicationLevel/MAJORITY 2)]]
     (testing (str (.getName (class t)) " ⇒ :info + loud for writes")
