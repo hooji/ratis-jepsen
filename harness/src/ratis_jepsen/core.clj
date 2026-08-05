@@ -15,13 +15,17 @@
 (ns ratis-jepsen.core
   "CLI entry and test-map assembly (DESIGN 2.1).
 
-  M0 shape: the register workload over independent keys, an optional
-  random-halves partition nemesis on a 15/15 s cycle, knossos
-  linearizability checking per key. `clojure -M:run test --help` for the
+  M1 shape: the register workload over independent keys, a fault schedule
+  chosen by --nemesis, knossos linearizability checking per key plus the
+  whole-history liveness checker. `clojure -M:run test --help` for the
   options; the interesting ones:
 
     --workload register        (the only workload until M2/M3)
-    --nemesis none|partition   fault schedule (default none)
+    --nemesis none|partition|crash|pause|mixed
+                               fault schedule (default none); crash =
+                               kill -9/restart of a leader-biased random
+                               minority, pause = SIGSTOP/SIGCONT, mixed
+                               interleaves all three at equal weight
     --time-limit 300           wall-clock ceiling; the op budget usually
                                exhausts first
     --key-count 5 --ops-per-key 400 --concurrency 10   the DESIGN 2.5
@@ -54,6 +58,28 @@
    [nil "--nemesis NAME" "Fault schedule during the run"
     :default "none"
     :validate [nemesis/kinds (cli/one-of nemesis/kinds)]]
+
+   ;; Crash/pause cycle knobs (the brief's "configurable cycle"); defaults
+   ;; live in ratis-jepsen.nemesis. The partition cycle is pinned (Job 04).
+   [nil "--crash-calm-s SECONDS" "Crash cycle: calm stretch before each kill"
+    :default (:calm-s nemesis/default-crash-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--crash-fault-s SECONDS" "Crash cycle: how long nodes stay killed"
+    :default (:fault-s nemesis/default-crash-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--pause-calm-s SECONDS" "Pause cycle: running stretch before each SIGSTOP"
+    :default (:calm-s nemesis/default-pause-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--pause-fault-s SECONDS" "Pause cycle: how long processes stay stopped"
+    :default (:fault-s nemesis/default-pause-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
 
    [nil "--key-count NUMBER" "How many independent register keys to run through"
     :default 5
@@ -97,7 +123,7 @@
   ;; land on the bind mount outside the container).
   (alter-var-root #'store/base-dir (constantly (:store-dir opts)))
   (let [workload ((workloads (:workload opts)) opts)
-        nem      (nemesis/package (:nemesis opts))]
+        nem      (nemesis/package (:nemesis opts) opts)]
     (merge tests/noop-test
            opts
            {:name      (str "ratis-kv-" (:workload opts)
