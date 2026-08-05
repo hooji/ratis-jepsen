@@ -278,9 +278,13 @@ constrain everything downstream and should be settled first.
 
 ## 7. Immediate next steps
 
-*(updated 2026-08-04: Q1/Q4/Q5 decided; Q7 settled for M0–M3 — Docker 5+1,
-dual-target dev/GHA — with only the FUSE-for-lazyfs spike left open, gating
-M4 only.)*
+*(updated 2026-08-04 (later): **M0 complete** — jobs 01–04 merged through
+the review protocol; both exit-gate runs reproduced independently by
+review (green ×2 stable, seeded-red caught); repository flipped public;
+M1 underway: job 05 nemesis-breadth + liveness checking ∥ job 06 CI +
+env polish. Earlier status: Q1/Q4/Q5 decided; Q7 settled — Docker 5+1,
+dual-target dev/GHA — with only the FUSE-for-lazyfs spike left open,
+gating M4 only.)*
 
 1. Write `docs/DESIGN.md` for M0 against the settled answers: SUT command
    protocol, state-machine sketch, harness namespaces, env topology (N≈7
