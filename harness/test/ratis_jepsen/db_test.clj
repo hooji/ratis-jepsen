@@ -66,6 +66,62 @@
   (testing "every voter gets the identical peers value"
     (is (apply = (map #(nth (db/server-args % nil) 3) env/initial-voters)))))
 
+(deftest join-server-args-contract-cli
+  (testing "join mode (Job 08): full 7-node address book + --join"
+    (is (= ["--id" "n6"
+            "--peers" (db/peers-spec env/all-nodes)
+            "--storage" "/var/lib/ratis-kv"
+            "--join"]
+           (db/join-server-args "n6" nil))))
+  (testing "seed-bug still appends after --join"
+    (is (= ["--id" "n7"
+            "--peers" (db/peers-spec env/all-nodes)
+            "--storage" "/var/lib/ratis-kv"
+            "--join"
+            "--seed-bug" "stale-reads"]
+           (db/join-server-args "n7" "stale-reads")))))
+
+(deftest dynamic-node-selection
+  (let [test {:membership-state (atom {:voters #{"n1" "n2" "n3" "n4" "n5"}
+                                       :pool #{"n6" "n7"}
+                                       :dynamic #{"n6" "n7"}})}]
+    (testing "with membership state, pool-history nodes start --join"
+      (is (db/dynamic-node? test "n6"))
+      (is (db/dynamic-node? test "n7"))
+      (is (not (db/dynamic-node? test "n1"))))
+    (testing "without membership state (non-membership runs), nobody does"
+      (is (not (db/dynamic-node? {} "n6")))
+      (is (not (db/dynamic-node? {:membership-state nil} "n7"))))))
+
+(deftest conf-line-parsing
+  ;; The verbatim shape observed live (SUT JoinModeTest, 2026-08-05;
+  ;; ServerState.setRaftConf at ratis-3.2.2) — hostnames abbreviated.
+  (let [stable (str "2026-08-05 20:49:18.495 [n1@group-ABBC16E54704-LeaderStateImpl] "
+                    "INFO org.apache.ratis.server.RaftServer$Division - "
+                    "n1@group-ABBC16E54704: set configuration conf: "
+                    "{index: 5, cur=peers:[n1|n1:6000, n2|n2:6000, n4|n4:6000]"
+                    "|listeners:[], old=null}")
+        transitional (str "n1@group-ABBC16E54704: set configuration conf: "
+                          "{index: 3, cur=peers:[n1|n1:6000, n2|n2:6000]"
+                          "|listeners:[n7|n7:6000], "
+                          "old=peers:[n1|n1:6000]|listeners:[]}")]
+    (testing "a stable conf line: index, servers, listeners, stable"
+      (is (= {:index 5
+              :servers ["n1" "n2" "n4"]
+              :listeners []
+              :stable? true}
+             (db/parse-conf-line stable))))
+    (testing "a transitional (old,new) line parses with stable? false"
+      (is (= {:index 3
+              :servers ["n1" "n2"]
+              :listeners ["n7"]
+              :stable? false}
+             (db/parse-conf-line transitional))))
+    (testing "non-conf lines and nil parse to nil"
+      (is (nil? (db/parse-conf-line nil)))
+      (is (nil? (db/parse-conf-line "n1: changes role from CANDIDATE to LEADER")))
+      (is (nil? (db/parse-conf-line "set configuration but not really"))))))
+
 (deftest tarball-selection
   (testing "exactly one match"
     (is (= {:name "ratis-kv-0.1.0-SNAPSHOT.tar.gz" :warning nil}

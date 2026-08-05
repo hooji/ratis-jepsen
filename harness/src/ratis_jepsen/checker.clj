@@ -352,3 +352,184 @@
                    (map (fn [node] [node (node-log-content test node)]))
                    (:nodes test))
              patterns)))))))
+
+;; ---------------------------------------------------------------------------
+;; Membership evidence (Job 08): a membership run must PROVE committed
+;; configuration changes happened — the evidence-assertion law from
+;; Job 07, applied to the new nemesis. Judged from the snarfed store
+;; logs, same as install-snapshot evidence.
+;;
+;; The discriminating line (ServerState.setRaftConf at ratis-3.2.2;
+;; phrasing observed live in the SUT's JoinModeTest and the shakedowns):
+;;
+;;   n1@group-…: set configuration conf: {index: 3, cur=peers:[n1|…,
+;;   n2|…]|listeners:[], old=peers:[n1|…]|listeners:[]}
+;;
+;; Only a REAL reconfiguration appends a transitional (old,new) conf
+;; entry — old= is non-null. Every other conf line is stable (old=null):
+;; the initial conf at index 0, the conf every NEW LEADER re-appends at
+;; its startup index (LeaderStateImpl.StartupLogEntry — elections would
+;; otherwise masquerade as conf changes), the stable entry that follows
+;; a committed reconfiguration, and boot-time recovery replays. Distinct
+;; transitional indexes across all node logs therefore count actual
+;; reconfigurations, deduplicated across replicas and restarts.
+;; ---------------------------------------------------------------------------
+
+(def conf-transition-pattern
+  "Matches a transitional (old,new) conf-adoption line and captures its
+  log index."
+  #"set configuration conf: \{index: (\d+), [^\n]*old=peers:")
+
+(defn conf-transition-indexes
+  "Pure: {node log-content} in, the sorted distinct log indexes of
+  transitional conf entries observed anywhere, out."
+  [node->content]
+  (->> (vals node->content)
+       (mapcat (fn [content]
+                 (->> (str/split-lines (or content ""))
+                      (keep #(second (re-find conf-transition-pattern %))))))
+       (map #(Long/parseLong %))
+       distinct
+       sort
+       vec))
+
+(defn membership-verdict
+  "Pure: the membership-evidence decision. `required?` = this run OWES
+  conf-change evidence (a dedicated membership kind with membership ops
+  actually in the history); min-changes = the floor on distinct
+  committed reconfigurations."
+  [required? min-changes indexes]
+  (cond
+    (not required?)
+    {:valid? true
+     :note "membership evidence not required for this run"
+     :transitions (count indexes)
+     :indexes indexes}
+
+    (>= (count indexes) min-changes)
+    {:valid? true, :transitions (count indexes), :indexes indexes}
+
+    :else
+    {:valid? false
+     :error  :no-conf-change-evidence
+     :note   (str "membership nemesis ran but only " (count indexes)
+                  " committed configuration change(s) appear in the node "
+                  "logs (transitional conf entries; " min-changes
+                  " required) — the run never exercised the path it "
+                  "exists to test")
+     :transitions (count indexes)
+     :indexes indexes}))
+
+(defn membership-ops?
+  "Does this history contain membership nemesis activity (moves or
+  probe)?"
+  [history]
+  (boolean (some #(and (not (client-op? %))
+                       (#{:member-add :member-remove :member-replace-dead
+                          :listener-add} (:f %)))
+                 history)))
+
+(defn membership-evidence
+  "The conf-change evidence checker. Composed unconditionally; counts
+  always reported; REQUIRED only when :require-evidence? (the workload
+  sets it for the dedicated membership kinds) and membership ops appear
+  in the history."
+  ([] (membership-evidence {}))
+  ([opts]
+   (let [require?    (boolean (:require-evidence? opts))
+         min-changes (long (or (:min-changes opts) 2))]
+     (reify checker/Checker
+       (check [_this test history _copts]
+         (membership-verdict
+           (and require? (membership-ops? history))
+           min-changes
+           (conf-transition-indexes
+             (into {}
+                   (map (fn [node] [node (node-log-content test node)]))
+                   (:nodes test)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Joiner-install evidence (Job 08, the combined membership+snapshot-churn
+;; requirement): a replace-dead/add composed with snapshot churn must
+;; show install-snapshot activity ON A NODE THAT JOINED during the run —
+;; the bootstrap-catch-up-via-install-snapshot path. Joined nodes come
+;; from the history (successful add moves); the install evidence is the
+;; follower-side receive pattern on those nodes' logs.
+;; ---------------------------------------------------------------------------
+
+(defn joined-nodes
+  "Nodes the history shows being committed INTO the conf: successful
+  :member-add ops and successful adds inside :member-replace-done."
+  [history]
+  (->> history
+       (remove client-op?)
+       (keep (fn [{:keys [f value]}]
+               (when (map? value)
+                 (case f
+                   :member-add
+                   (when (get-in value [:result :success?]) (:target value))
+                   :member-replace-done
+                   (when (get-in value [:add :result :success?])
+                     (get-in value [:add :target]))
+                   nil))))
+       distinct
+       vec))
+
+(defn joiner-install-verdict
+  "Pure: the joiner-install decision. Requires >= 1 install-snapshot
+  receive line on at least one joined node when `required?`."
+  [required? joined node->receives]
+  (let [with-installs (->> joined
+                           (filter #(pos? (get node->receives % 0)))
+                           vec)]
+    (cond
+      (not required?)
+      {:valid? true
+       :note "joiner-install evidence not required for this run"
+       :joined joined
+       :joined-with-installs with-installs}
+
+      (empty? joined)
+      {:valid? false
+       :error  :no-committed-join
+       :note   (str "combined membership+snapshot-churn run committed no "
+                    "add — no joining node exists to install a snapshot")
+       :joined joined
+       :joined-with-installs with-installs}
+
+      (seq with-installs)
+      {:valid? true
+       :joined joined
+       :joined-with-installs with-installs
+       :receive-counts (select-keys node->receives joined)}
+
+      :else
+      {:valid? false
+       :error  :no-joiner-install-evidence
+       :note   (str "nodes " (pr-str joined) " joined during the run but "
+                    "none of their logs shows an install-snapshot receive "
+                    "— the bootstrap-catch-up-via-install-snapshot path "
+                    "never ran")
+       :joined joined
+       :joined-with-installs with-installs})))
+
+(defn joiner-install-evidence
+  "The joining-node install-snapshot checker (REQUIRED only for the
+  dedicated combined kind)."
+  ([] (joiner-install-evidence {}))
+  ([opts]
+   (let [require? (boolean (:require-evidence? opts))]
+     (reify checker/Checker
+       (check [_this test history _copts]
+         (let [receives (into {}
+                              (map (fn [node]
+                                     [(name node)
+                                      (->> (str/split-lines
+                                             (or (node-log-content test node) ""))
+                                           (filter #(re-find (:receive install-snapshot-patterns) %))
+                                           count)]))
+                              (:nodes test))]
+           (joiner-install-verdict
+             (and require? (membership-ops? history) (churn-ops? history))
+             (joined-nodes history)
+             receives)))))))

@@ -24,21 +24,60 @@
 
 (deftest cli-kinds-surface
   (is (= #{"none" "partition" "crash" "pause" "mixed"
-           "snapshot-churn" "transfer" "mixed-all"}
+           "snapshot-churn" "transfer" "membership"
+           "membership-snapshot-churn" "listener-probe" "mixed-all"}
          nemesis/kinds)))
 
 (deftest fault-heal-vocabulary
   (testing "every fault has exactly one heal; no f plays both roles"
-    (is (= #{:start :crash :pause :churn-kill} nemesis/fault-fs))
-    (is (= #{:stop :restart :resume :churn-restart} nemesis/heal-fs))
+    (is (= #{:start :crash :pause :churn-kill :member-replace-dead}
+           nemesis/fault-fs))
+    (is (= #{:stop :restart :resume :churn-restart :member-replace-done}
+           nemesis/heal-fs))
     (is (empty? (set/intersection nemesis/fault-fs nemesis/heal-fs)))
     (is (= (count nemesis/fault-fs)
            (count (set (vals nemesis/fault->heal))))))
-  (testing "action fs act without gating: disjoint from faults and heals"
-    (is (= #{:churn-transfer :churn-snapshot :transfer} nemesis/action-fs))
+  (testing "action fs act without gating: disjoint from faults and heals.
+            Membership adds/removes and the whole listener probe are
+            actions — a healthy majority persists through them, so they
+            must not excuse a stall; only replace-dead (a genuinely dead
+            voter) gates"
+    (is (= #{:churn-transfer :churn-snapshot :transfer
+             :member-add :member-remove
+             :listener-add :listener-census :listener-promote
+             :listener-demote :listener-remove}
+           nemesis/action-fs))
     (is (empty? (set/intersection nemesis/action-fs
                                   (set/union nemesis/fault-fs
                                              nemesis/heal-fs))))))
+
+(deftest membership-band
+  (testing "the 5±2 band the brief pins"
+    (is (= 3 nemesis/min-voters))
+    (is (= 7 nemesis/max-voters))))
+
+(deftest initial-membership-state-shape
+  (let [s (nemesis/initial-membership-state
+            ["n1" "n2" "n3" "n4" "n5" "n6" "n7"]
+            ["n1" "n2" "n3" "n4" "n5"])]
+    (is (= #{"n1" "n2" "n3" "n4" "n5"} (:voters s)))
+    (is (= #{"n6" "n7"} (:pool s)))
+    (is (= #{"n6" "n7"} (:dynamic s))))
+  (testing "voters not present in the node list are dropped"
+    (let [s (nemesis/initial-membership-state
+              ["n1" "n2" "n3"] ["n1" "n2" "n3" "n4" "n5"])]
+      (is (= #{"n1" "n2" "n3"} (:voters s)))
+      (is (= #{} (:pool s))))))
+
+(deftest conf-nodes-selection
+  (testing "without membership state: the test's nodes (M0/M1 behavior)"
+    (is (= ["n1" "n2"] (nemesis/conf-nodes {:nodes ["n1" "n2"]}))))
+  (testing "with membership state: the intended voters, sorted"
+    (is (= ["n1" "n3"]
+           (nemesis/conf-nodes
+             {:nodes ["n1" "n2" "n3"]
+              :membership-state (atom {:voters #{"n3" "n1"}
+                                       :pool #{"n2"}})})))))
 
 (deftest max-minority-sizing
   (testing "survivors always keep a majority"
@@ -175,26 +214,108 @@
     (testing "all three kinds appear (100 draws; P[miss] ~ (2/3)^100)"
       (is (= known (set segments))))))
 
-(deftest mixed-all-interleaves-all-five-kinds
-  (let [known    [churn-segment-shape       ; matching full shapes is
-                  partition-segment-shape   ; unambiguous: every pair
-                  crash-segment-shape       ; differs at its fault op
-                  pause-segment-shape       ; (element 2) at the latest
-                  transfer-segment-shape]
-        ;; 240 elements always ends mid-segment; trim to whole segments
+(def member-add-segment-shape
+  [{:type :sleep, :value 15}
+   {:type :info, :f :member-add}])
+
+(def member-remove-segment-shape
+  [{:type :sleep, :value 15}
+   {:type :info, :f :member-remove}])
+
+(def member-replace-segment-shape
+  [{:type :sleep, :value 15}
+   {:type :info, :f :member-replace-dead}
+   {:type :sleep, :value 8}
+   {:type :info, :f :member-replace-done}])
+
+(def membership-segment-shapes
+  #{member-add-segment-shape member-remove-segment-shape
+    member-replace-segment-shape})
+
+(deftest membership-segment-shapes-test
+  (testing "each move: calm, then the move; replace is the fault pair
+            around the dead-and-removed window"
+    (is (= member-add-segment-shape
+           (nemesis/member-add-segment default-cycles)))
+    (is (= member-remove-segment-shape
+           (nemesis/member-remove-segment default-cycles)))
+    (is (= member-replace-segment-shape
+           (nemesis/member-replace-segment default-cycles))))
+  (testing "a membership segment is always one of the three moves"
+    (dotimes [_ 30]
+      (is (contains? membership-segment-shapes
+                     (nemesis/membership-segment default-cycles)))))
+  (testing "cadence is configurable"
+    (is (= [{:type :sleep, :value 40}
+            {:type :info, :f :member-replace-dead}
+            {:type :sleep, :value 3}
+            {:type :info, :f :member-replace-done}]
+           (nemesis/member-replace-segment
+             (nemesis/cycles {:membership-calm-s 40
+                              :membership-replace-dead-s 3}))))))
+
+(defn- split-segments
+  "Greedily splits a generator element stream into whole known segments;
+  stops at the first unmatched or incomplete tail."
+  [elements known]
+  (loop [es elements, out []]
+    (let [m (some (fn [s] (when (= s (take (count s) es)) s)) known)]
+      (if (and m (>= (count es) (count m)))
+        (recur (drop (count m) es) (conj out m))
+        out))))
+
+(deftest membership-generator-draws-every-move
+  (let [segments (split-segments
+                   (take 200 (nemesis/membership-generator default-cycles))
+                   membership-segment-shapes)]
+    (testing "an endless stream of membership segments, all three moves
+              re-drawn per cycle (~75 draws; P[missing one] < 1e-10)"
+      (is (<= 60 (count segments)))
+      (is (= membership-segment-shapes (set segments))))))
+
+(deftest membership-churn-generator-draws-both-kinds
+  (let [known    (conj membership-segment-shapes churn-segment-shape)
+        segments (split-segments
+                   (take 300 (nemesis/membership-churn-generator
+                               default-cycles))
+                   known)]
+    (testing "the combined kind interleaves membership moves with whole
+              snapshot-churn cycles"
+      (is (<= 40 (count segments)))
+      (is (some #(= churn-segment-shape %) segments))
+      (is (some membership-segment-shapes segments)))))
+
+(deftest listener-probe-script-shape
+  (testing "the probe is finite and scripted: add, census, promote,
+            census, demote, remove — all actions, no fault windows"
+    (is (= [:listener-add :listener-census :listener-promote
+            :listener-census :listener-demote :listener-remove]
+           (->> nemesis/listener-probe-script
+                (keep :f)
+                vec)))
+    (is (every? nemesis/action-fs
+                (keep :f nemesis/listener-probe-script)))))
+
+(deftest mixed-all-interleaves-all-six-kinds
+  (let [known    (into [churn-segment-shape   ; matching full shapes is
+                        partition-segment-shape ; unambiguous: every pair
+                        crash-segment-shape   ; differs at its fault op
+                        pause-segment-shape   ; (element 2) at the latest
+                        transfer-segment-shape]
+                       membership-segment-shapes)
+        ;; 300 elements always ends mid-segment; trim to whole segments
         ;; by consuming until the tail is shorter than the longest shape.
-        elements (take 240 (nemesis/mixed-all-generator default-cycles))
-        segments (loop [es elements, out []]
-                   (let [m (some (fn [s]
-                                   (when (= s (take (count s) es)) s))
-                                 known)]
-                     (if (and m (>= (count es) (count m)))
-                       (recur (drop (count m) es) (conj out m))
-                       out)))]
-    (testing "the stream is whole segments drawn from all five kinds
-              (~80+ draws; P[missing a kind] < 1e-5)"
-      (is (<= 30 (count segments)))
-      (is (= (set known) (set segments))))))
+        elements (take 300 (nemesis/mixed-all-generator default-cycles))
+        segments (split-segments elements known)
+        kind-of  (fn [segment]
+                   (if (contains? membership-segment-shapes segment)
+                     :membership
+                     segment))]
+    (testing "the stream is whole segments drawn from all six kinds
+              (~70+ draws; P[missing a kind] < 1e-5 — membership counts
+              as one kind, its three move shapes pooled)"
+      (is (<= 40 (count segments)))
+      (is (= (set (map kind-of known)) (set (map kind-of segments)))))))
 
 (deftest package-m2-kinds
   (testing "snapshot-churn and transfer cycle their segments"
@@ -202,6 +323,18 @@
            (take 8 (:generator (nemesis/package "snapshot-churn")))))
     (is (= transfer-segment-shape
            (take 2 (:generator (nemesis/package "transfer"))))))
+  (testing "membership: an endless stream of membership segments"
+    (let [segments (split-segments
+                     (take 100 (:generator (nemesis/package "membership")))
+                     membership-segment-shapes)]
+      (is (<= 30 (count segments)))))
+  (testing "membership-snapshot-churn: membership + churn segments"
+    (is (= 80 (count (take 80 (:generator
+                                (nemesis/package
+                                  "membership-snapshot-churn")))))))
+  (testing "listener-probe: the finite script, verbatim"
+    (is (= nemesis/listener-probe-script
+           (:generator (nemesis/package "listener-probe")))))
   (testing "mixed-all: an infinite stream"
     (is (= 60 (count (take 60 (:generator (nemesis/package "mixed-all"))))))))
 

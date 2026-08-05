@@ -61,23 +61,49 @@ final class MiniCluster implements AutoCloseable {
 
   /** Starts {@code n} servers; {@code seedBug} may be null for a correct cluster. */
   static MiniCluster start(Path baseDir, int n, SeedBug seedBug) throws Exception {
+    return start(baseDir, n, 0, seedBug);
+  }
+
+  /**
+   * Starts {@code voters} servers forming the group plus {@code joiners}
+   * servers in {@code --join} mode (in the initial conf's address book but
+   * NOT its group — the M2 membership-pool posture). Joiner ids continue
+   * the voter numbering: 3 voters + 1 joiner = n1..n3 voting, n4 joining.
+   * Voters get exactly the voter set as {@code --peers} (the initial conf);
+   * joiners get the full address book plus {@code --join}.
+   */
+  static MiniCluster start(Path baseDir, int voters, int joiners, SeedBug seedBug)
+      throws Exception {
     final MiniCluster cluster = new MiniCluster(baseDir);
+    final int n = voters + joiners;
     final List<Integer> ports = allocatePorts(n);
 
-    final StringBuilder peersSpec = new StringBuilder();
+    final StringBuilder votersSpec = new StringBuilder();
+    final StringBuilder fullSpec = new StringBuilder();
     for (int i = 0; i < n; i++) {
-      if (i > 0) {
-        peersSpec.append(',');
+      final String entry = "n" + (i + 1) + "=127.0.0.1:" + ports.get(i);
+      if (i < voters) {
+        if (i > 0) {
+          votersSpec.append(',');
+        }
+        votersSpec.append(entry);
       }
-      peersSpec.append("n").append(i + 1).append("=127.0.0.1:").append(ports.get(i));
+      if (i > 0) {
+        fullSpec.append(',');
+      }
+      fullSpec.append(entry);
     }
 
     for (int i = 0; i < n; i++) {
       final String id = "n" + (i + 1);
+      final boolean join = i >= voters;
       final List<String> argv = new ArrayList<>(List.of(
           "--id", id,
-          "--peers", peersSpec.toString(),
+          "--peers", join ? fullSpec.toString() : votersSpec.toString(),
           "--storage", baseDir.resolve(id).toString()));
+      if (join) {
+        argv.add("--join");
+      }
       if (seedBug != null) {
         argv.add("--seed-bug");
         argv.add(seedBug.cliName());
@@ -106,12 +132,34 @@ final class MiniCluster implements AutoCloseable {
   /** A client for the cluster's group with a bounded retry policy (~30 s). */
   RaftClient newClient() {
     final ServerOptions any = optionsById.values().iterator().next();
+    return newClient(any.peers());
+  }
+
+  /**
+   * A client over every node (voters and join-mode members alike) — the
+   * peer list a membership test needs so GroupManagementApi calls can be
+   * routed to a joiner by id.
+   */
+  RaftClient newClientAllNodes() {
+    final Map<String, String> all = new LinkedHashMap<>();
+    for (ServerOptions options : optionsById.values()) {
+      all.put(options.id(), options.selfAddress());
+    }
+    return newClient(all);
+  }
+
+  private RaftClient newClient(Map<String, String> peers) {
     return RaftClient.newBuilder()
         .setProperties(new RaftProperties())
-        .setRaftGroup(Main.buildGroup(any.peers()))
+        .setRaftGroup(Main.buildGroup(peers))
         .setRetryPolicy(RetryPolicies.retryUpToMaximumCountWithFixedSleep(
             150, TimeDuration.valueOf(200, TimeUnit.MILLISECONDS)))
         .build();
+  }
+
+  /** The parsed options of node {@code id} (ports, storage, peers). */
+  ServerOptions options(String id) {
+    return optionsById.get(id);
   }
 
   // ---- protocol helpers ----

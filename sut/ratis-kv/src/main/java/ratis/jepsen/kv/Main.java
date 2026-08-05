@@ -98,6 +98,14 @@ public final class Main {
     if (options.seedBug() != null) {
       LOG.warn(String.format(KvStateMachine.SEED_BUG_BANNER_FORMAT, options.seedBug().cliName()));
     }
+    if (options.join()) {
+      // Emitted BEFORE the contract startup line so tooling that awaits the
+      // startup line can also see the mode. The startup line itself is
+      // byte-compatible with the DESIGN 2.6 contract; in join mode peers=
+      // is the address book, not a formed conf.
+      LOG.info("ratis-kv join mode: id={} formed no group; awaiting GroupManagementApi.add "
+          + "(existing storage is recovered instead)", options.id());
+    }
     LOG.info("ratis-kv server started: id={} address={} storage={} group={} peers={}",
         options.id(), options.selfAddress(), options.storageDir(), GROUP_ID, options.peers());
 
@@ -120,15 +128,27 @@ public final class Main {
    * seed-bug mode, {@code RECOVER} startup (works for both fresh and
    * existing storage dirs). This is the single assembly path — the CLI and
    * the in-JVM tests both use it.
+   *
+   * <p>In {@code --join} mode no group is set (the builder's group stays
+   * null — the same shape as Ratis's own {@code GroupManagementBaseTest},
+   * which starts servers "with null group"): on fresh storage the server
+   * hosts nothing until the harness bootstraps it with
+   * {@code GroupManagementApi.add}; on existing storage the proxy's startup
+   * scan recovers the stored group ({@code RaftServerProxy.initGroups} at
+   * ratis-3.2.2), which makes {@code --join} also the correct restart mode
+   * for a node that already joined dynamically. {@code --peers} then serves
+   * only as the address book (the self entry supplies the bind port).
    */
   public static RaftServer buildServer(ServerOptions options) throws IOException {
-    return RaftServer.newBuilder()
+    final RaftServer.Builder builder = RaftServer.newBuilder()
         .setServerId(RaftPeerId.valueOf(options.id()))
-        .setGroup(buildGroup(options.peers()))
         .setStateMachine(new KvStateMachine(options.seedBug()))
         .setProperties(buildProductionProperties(options))
-        .setOption(RaftStorage.StartupOption.RECOVER)
-        .build();
+        .setOption(RaftStorage.StartupOption.RECOVER);
+    if (!options.join()) {
+      builder.setGroup(buildGroup(options.peers()));
+    }
+    return builder.build();
   }
 
   /** The fixed-id group over the configured peers. */
@@ -162,11 +182,18 @@ public final class Main {
   static String usage() {
     return """
         Usage: ratis-kv --id <id> --peers <id=host:port>[,<id=host:port>...] \\
-                        --storage <dir> [--seed-bug stale-reads] [--help]
+                        --storage <dir> [--join] [--seed-bug stale-reads] [--help]
 
           --id       this node's id; must appear in --peers
           --peers    the full fixed voter set, identical on every node
+                     (in --join mode: an address book — only the self entry
+                     is used, for the bind port)
           --storage  raft storage directory
+          --join     start without forming a group: the server hosts nothing
+                     until it is bootstrapped via GroupManagementApi.add and
+                     committed into the conf by setConfiguration (existing
+                     storage, if any, is recovered instead) — the M2
+                     membership-pool mode
           --seed-bug activate a deliberately seeded bug (testing the test
                      harness only; never use in a run you care about):
                        stale-reads  linearizable reads observe ~500 ms stale state
