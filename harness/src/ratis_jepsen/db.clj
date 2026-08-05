@@ -16,8 +16,9 @@
   "Node lifecycle for ratis-kv to the DESIGN 2.6 deployment contract:
   install (tarball from control → /opt/ratis-kv), start (contract CLI via
   start-stop-daemon, stdout → /var/log/ratis-kv.log, pidfile, await the
-  startup line with a deadline), kill (kill -9 by pidfile), wipe
-  (/var/lib/ratis-kv), logs.
+  startup line with a deadline), kill (kill -9 by pidfile), pause/resume
+  (SIGSTOP/SIGCONT by pidfile), wipe (/var/lib/ratis-kv), logs — plus the
+  best-effort leader census the crash nemesis uses for targeting bias.
 
   Layout: pure functions (command/argument construction, tarball
   selection) sit on top; everything that talks to a node through
@@ -170,10 +171,71 @@
   []
   (cu/stop-daemon! pid-file))
 
+(defn- signal!*
+  "Sends `sig` (e.g. \"STOP\") to the pidfile's process on the current
+  node. Returns `ok` on delivery, :no-pidfile when no pidfile exists
+  (never started, or removed by a kill), :stale-pidfile when the pidfile
+  names a process that is gone. Tolerant on purpose: the pause nemesis
+  must degrade to a reported no-op, not crash, when it races a restart."
+  [sig ok]
+  (if-let [pid (try (c/exec :cat pid-file) (catch Exception _ nil))]
+    (try (c/exec :kill (str "-" sig) pid)
+         ok
+         (catch Exception _
+           (log/warn "kill -" sig pid "failed — stale pidfile?")
+           :stale-pidfile))
+    :no-pidfile))
+
+(defn pause!*
+  "SIGSTOP the server process by pidfile (the launcher execs java, so the
+  pid is the JVM itself). The process keeps its sockets; peers see it as
+  present-but-silent until resume."
+  []
+  (signal!* "STOP" :paused))
+
+(defn resume!*
+  "SIGCONT the server process by pidfile. Harmless if it was not stopped."
+  []
+  (signal!* "CONT" :resumed))
+
 (defn wipe!
   "Removes the raft storage dir and the log."
   []
   (c/exec :rm :-rf env/storage-dir env/log-file))
+
+;; ---------------------------------------------------------------------------
+;; Leader census (best-effort, for nemesis targeting bias only)
+;; ---------------------------------------------------------------------------
+
+(defn leader-transition?
+  "True iff a Ratis role-transition log line records a transition TO
+  leader (e.g. \"n1@group-...: changes role from CANDIDATE to LEADER at
+  term 2 ...\"). Same convention as env/validate.sh check (b)."
+  [line]
+  (boolean (and line (re-find #"changes role from \S+ to LEADER" line))))
+
+(defn last-role-transition!
+  "The last role-transition line in the current node's log, or nil when
+  the log has none (or does not exist)."
+  []
+  (let [out (try (c/exec :bash :-c (str "grep 'changes role from' "
+                                        env/log-file
+                                        " 2>/dev/null | tail -n 1"))
+                 (catch Exception _ ""))]
+    (when-not (str/blank? out) out)))
+
+(defn current-leaders!
+  "Best-effort census of the nodes that currently believe they lead: a
+  node counts iff the LAST role transition in its log is to LEADER
+  (current leadership, not election history — validate.sh check (b)).
+  Wrong answers are possible mid-election, or on a node killed before it
+  could log a demotion; callers use this to BIAS fault targeting, never
+  for correctness."
+  [test]
+  (->> (c/on-nodes test (fn [_test _node]
+                          (leader-transition? (last-role-transition!))))
+       (keep (fn [[node leader?]] (when leader? node)))
+       vec))
 
 ;; ---------------------------------------------------------------------------
 ;; Jepsen DB
@@ -195,13 +257,22 @@
     [env/log-file])
 
   ;; Kill/restart primitives from day one (DESIGN 2.2) — M1's crash
-  ;; nemesis calls these.
+  ;; nemesis calls these. Restart goes through the same start!* as first
+  ;; boot: the SUT opens its storage with StartupOption.RECOVER either way.
   jdb/Kill
   (start! [_this _test node]
     (start!* node seed-bug))
 
   (kill! [_this _test _node]
-    (kill!*)))
+    (kill!*))
+
+  ;; SIGSTOP/SIGCONT primitives — M1's pause nemesis calls these.
+  jdb/Pause
+  (pause! [_this _test _node]
+    (pause!*))
+
+  (resume! [_this _test _node]
+    (resume!*)))
 
 (defn db
   "The ratis-kv DB; pass a seed-bug mode name (e.g. \"stale-reads\") to

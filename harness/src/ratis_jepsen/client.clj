@@ -18,8 +18,9 @@
 
   - one RaftClient per Jepsen process (open! builds it, close! closes it) —
     one worker = one ClientId = one callId stream;
-  - retry policy noRetry, so every ambiguity surfaces to the outcome map
-    instead of being laundered by the library;
+  - retry policy: bounded fixed-sleep same-callId retries (DESIGN 2.3 and
+    PLAN Q3 as amended 2026-08-05 — see open-raft-client for the
+    soundness argument and the history);
   - ops {:f :read} / {:f :write} / {:f :cas} map 1:1 onto the DESIGN 1.4
     wire protocol (GET / PUT / CAS); writes travel client.io().send,
     reads client.io().sendReadOnly;
@@ -32,12 +33,13 @@
             [jepsen.independent :as independent]
             [ratis-jepsen.env-contract :as env]
             [ratis-jepsen.outcome :as outcome])
-  (:import (java.util.concurrent TimeoutException)
+  (:import (java.util.concurrent TimeoutException TimeUnit)
            (org.apache.ratis.client RaftClient)
            (org.apache.ratis.conf RaftProperties)
            (org.apache.ratis.protocol Message RaftClientReply RaftGroup
                                       RaftGroupId RaftPeer)
-           (org.apache.ratis.retry RetryPolicies)))
+           (org.apache.ratis.retry RetryPolicies)
+           (org.apache.ratis.util TimeDuration)))
 
 (def invoke-timeout-ms
   "Harness-side deadline on every invocation: 5 s, above the library's 3 s
@@ -103,13 +105,42 @@
                           (.build)))
                     id->address)))
 
+(def retry-attempts
+  "Max attempts per invocation (bounded — jepsen still wants raw outcomes,
+  never the library's retry-forever default)."
+  4)
+
+(def retry-sleep-ms
+  "Fixed sleep between attempts. 4 fast-failing attempts cost ~0.8 s —
+  well under invoke-timeout-ms; slow attempts (rpc timeouts) run into the
+  harness deadline instead and surface as :info via the outcome map."
+  200)
+
 (defn open-raft-client
-  "One RaftClient, default properties, noRetry (DESIGN 2.3)."
+  "One RaftClient, default properties, bounded fixed-sleep retries
+  (DESIGN 2.3 / PLAN Q3 as amended 2026-08-05).
+
+  Originally noRetry, so every ambiguity surfaced raw — but Review 05
+  (reviews/05-nemesis-breadth/05_report.md) proved that unsound in
+  combination with the outcome map: a deposed leader completes
+  appended-but-uncommitted writes with NotLeaderException and the entries
+  can commit under its successor, so the \"definite\" NLE :fail produced a
+  false-red on a healthy cluster. Bounded same-callId retries are the
+  sound fix, per the reviewer's verification against ratis-client 3.2.2:
+  BlockingImpl.send captures the callId once and every retry attempt
+  rebuilds the request with that same (ClientId, callId), the server's
+  retry cache deduplicates re-attempts, and a step-down-committed write's
+  retry returns the cached success instead of a lying NLE — no
+  double-apply is possible. Transients now mostly resolve to their true
+  outcome; the exhausted residual is graded :info by the outcome map."
   ^RaftClient [id->address]
   (-> (RaftClient/newBuilder)
       (.setProperties (RaftProperties.))
       (.setRaftGroup (raft-group id->address))
-      (.setRetryPolicy (RetryPolicies/noRetry))
+      (.setRetryPolicy (RetryPolicies/retryUpToMaximumCountWithFixedSleep
+                         retry-attempts
+                         (TimeDuration/valueOf retry-sleep-ms
+                                               TimeUnit/MILLISECONDS)))
       (.build)))
 
 (defn- send-request
