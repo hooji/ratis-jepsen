@@ -38,15 +38,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       rlwrap \
     && rm -rf /var/lib/apt/lists/*
 
-# Optional extra CA certificate (base64-encoded PEM), for hosts that sit
-# behind a TLS-inspecting proxy: trusted system-wide, including the JVM
-# keystore (ca-certificates-java hook), so curl/Maven/Clojure work at build
-# time and runtime. A no-op when the build-arg is unset. See env/README.md;
-# run.sh wires RJ_EXTRA_CA_BUNDLE to this.
+# Optional extra CA certificate(s) (base64-encoded PEM bundle), for hosts
+# that sit behind a TLS-inspecting proxy: trusted system-wide, including the
+# JVM keystore, so curl/Maven/Clojure work at build time and runtime. The
+# bundle is split one-cert-per-file before update-ca-certificates because
+# Debian's ca-certificates-java hook imports only the FIRST cert of each
+# file into the JVM keystore — a multi-cert file would be half-trusted
+# (system store yes, JVM no; Review 02 finding 2). The split keeps only
+# BEGIN/END CERTIFICATE blocks, so comment lines between certs are fine.
+# Fails the build loudly if the bundle decodes to no certificate at all.
+# A no-op when the build-arg is unset. See env/README.md; run.sh wires
+# RJ_EXTRA_CA_BUNDLE to this (with a size pre-flight).
 ARG EXTRA_CA_B64=
 RUN if [ -n "$EXTRA_CA_B64" ]; then \
-      echo "$EXTRA_CA_B64" | base64 -d \
-        > /usr/local/share/ca-certificates/ratis-jepsen-extra-ca.crt \
+      echo "$EXTRA_CA_B64" | base64 -d > /tmp/extra-ca-bundle.pem \
+      && awk '/-----BEGIN CERTIFICATE-----/ { n++; keep = 1; f = sprintf("/usr/local/share/ca-certificates/ratis-jepsen-extra-ca-%02d.crt", n) } keep { print >> f } /-----END CERTIFICATE-----/ { keep = 0; close(f) }' \
+             /tmp/extra-ca-bundle.pem \
+      && rm /tmp/extra-ca-bundle.pem \
+      && count=$(ls /usr/local/share/ca-certificates/ratis-jepsen-extra-ca-*.crt | wc -l) \
+      && echo "EXTRA_CA_B64: split into ${count} certificate file(s)" \
       && update-ca-certificates; \
     fi
 

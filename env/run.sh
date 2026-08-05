@@ -18,7 +18,7 @@
 #
 #   run.sh up     build image if needed, start compose, wait for ssh on all nodes
 #   run.sh down   stop and remove containers, network and volumes; idempotent
-#   run.sh test   stub until Job 04 lands the harness (exits 64)
+#   run.sh test   run the harness on control; args pass through (--nemesis, --time-limit, --seed-bug, ...) and the harness exit code is the verdict
 #
 # Environment knobs:
 #   RJ_SSH_READY_TIMEOUT   seconds to wait for each node's sshd (default 120)
@@ -33,6 +33,12 @@ SSH_KEY="${STATE_DIR}/ssh/id_ed25519"
 IMAGE="ratis-jepsen/env:latest"
 NODES=(n1 n2 n3 n4 n5 n6 n7)
 SSH_READY_TIMEOUT="${RJ_SSH_READY_TIMEOUT:-120}"
+# The CA bundle travels base64-encoded as ONE docker build-arg, i.e. one
+# exec(2) argument, and the kernel caps a single argument at ~128 KiB
+# (MAX_ARG_STRLEN); base64 inflates by 4/3. 64 KiB of PEM stays safely
+# under that and is ~30 certificates — far more than the "just your
+# proxy's CA(s)" the knob is for.
+CA_BUNDLE_MAX_BYTES=65536
 
 compose() {
   docker compose -f "${ENV_DIR}/docker-compose.yml" "$@"
@@ -55,9 +61,38 @@ ensure_ssh_key() {
   chmod 600 "${SSH_KEY}"
 }
 
+# Catch bad RJ_EXTRA_CA_BUNDLE input here, with instructions, instead of
+# letting docker build die later with a cryptic error (an oversized bundle
+# hits the kernel's per-argument cap as 'Argument list too long').
+preflight_ca_bundle() {
+  local bundle=$1 size
+  if [[ ! -r "${bundle}" ]]; then
+    echo "run.sh: ERROR: RJ_EXTRA_CA_BUNDLE=${bundle} is not a readable file" >&2
+    exit 1
+  fi
+  if ! grep -q -- '-----BEGIN CERTIFICATE-----' "${bundle}"; then
+    echo "run.sh: ERROR: RJ_EXTRA_CA_BUNDLE=${bundle} contains no PEM" \
+         "certificate (no '-----BEGIN CERTIFICATE-----' line; DER input?)." \
+         "Convert with: openssl x509 -inform der -in <file> -out <file>.pem" >&2
+    exit 1
+  fi
+  size=$(wc -c < "${bundle}")
+  if ((size > CA_BUNDLE_MAX_BYTES)); then
+    echo "run.sh: ERROR: RJ_EXTRA_CA_BUNDLE=${bundle} is ${size} bytes," \
+         "over the ${CA_BUNDLE_MAX_BYTES}-byte cap. It travels as a single" \
+         "docker build-arg, so base64-encoded it would exceed the kernel's" \
+         "~128 KiB per-argument limit and docker build would fail with" \
+         "'Argument list too long'. Pass only the CA certificate(s) your" \
+         "proxy chain actually needs, not a full system bundle — see the" \
+         "RJ_EXTRA_CA_BUNDLE notes in env/README.md." >&2
+    exit 1
+  fi
+}
+
 build_image() {
   local args=(build --tag "${IMAGE}")
   if [[ -n "${RJ_EXTRA_CA_BUNDLE:-}" ]]; then
+    preflight_ca_bundle "${RJ_EXTRA_CA_BUNDLE}"
     # base64 < file | tr: portable across GNU and BSD/macOS base64
     args+=(--build-arg "EXTRA_CA_B64=$(base64 < "${RJ_EXTRA_CA_BUNDLE}" | tr -d '\n')")
   fi

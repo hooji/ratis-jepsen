@@ -26,7 +26,12 @@
 #   (c) port 6000 is listening on all five nodes;
 #   (d) SIGTERM stops all five servers cleanly.
 # Exits 0 only if every check holds, printing each check's evidence line.
-set -euo pipefail
+# Failures inside a check print a named "validate: FAIL: ..." verdict; any
+# *other* abort (a node dying between checks, a build error — anything
+# set -e kills) lands in the ERR trap below, which names the step that
+# died, the failing command, and dumps node log tails. Either way a
+# failure is non-zero and says where it happened.
+set -Eeuo pipefail
 
 ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -73,12 +78,43 @@ dump_log_tail() {
   on_node "${node}" "tail -n 20 ${LOG_FILE} 2>/dev/null" >&2 || true
 }
 
+# Announces a step/check and records it for the ERR trap's summary.
+CURRENT_STEP="startup (before the first step)"
+SERVERS_STARTED=0
+
+step() {
+  CURRENT_STEP="$*"
+  say "$*"
+}
+
+# Uniform failure shape for aborts that bypass fail(): under set -e any
+# unguarded command failure (node death between checks, ssh drop, build
+# error) kills the script — this trap first says which step died and on
+# what command, then dumps node log tails (only meaningful once servers
+# have been started). fail() exits directly and never trips this.
+on_err() {
+  local rc=$1 line=$2 cmd=$3
+  {
+    echo "validate: FAIL: command exited ${rc} during: ${CURRENT_STEP}"
+    echo "validate: FAIL: at line ${line}: ${cmd}"
+  } >&2
+  if ((SERVERS_STARTED)); then
+    local node
+    for node in "${SERVERS[@]}"; do
+      dump_log_tail "${node}"
+    done
+  else
+    echo "validate: (servers not started yet; no node logs to dump)" >&2
+  fi
+}
+trap 'on_err "$?" "${LINENO}" "${BASH_COMMAND}"' ERR
+
 # --- bring the environment up ---------------------------------------------
-say "step: run.sh up"
+step "step: run.sh up"
 "${ENV_DIR}/run.sh" up
 
 # --- build the SUT tarball inside control ----------------------------------
-say "step: build SUT tarball inside control"
+step "step: build SUT tarball inside control"
 in_control /ratis-jepsen/sut/ratis-kv/mvnw \
   -f /ratis-jepsen/sut/ratis-kv/pom.xml -q package
 TARBALL=$(in_control bash -c \
@@ -87,7 +123,7 @@ TARBALL=$(in_control bash -c \
 say "built ${TARBALL}"
 
 # --- install and start on n1..n5 -------------------------------------------
-say "step: install tarball at ${INSTALL_DIR} on ${SERVERS[*]}"
+step "step: install tarball at ${INSTALL_DIR} on ${SERVERS[*]}"
 for node in "${SERVERS[@]}"; do
   on_node "${node}" "rm -rf ${INSTALL_DIR} ${STORAGE_DIR} ${LOG_FILE} ${PID_FILE} \
     && mkdir -p ${INSTALL_DIR} ${STORAGE_DIR}"
@@ -96,15 +132,16 @@ for node in "${SERVERS[@]}"; do
     && rm /tmp/ratis-kv.tar.gz && test -x ${INSTALL_DIR}/bin/ratis-kv"
 done
 
-say "step: start servers (stdout -> ${LOG_FILE})"
+step "step: start servers (stdout -> ${LOG_FILE})"
 for node in "${SERVERS[@]}"; do
   on_node "${node}" "nohup ${INSTALL_DIR}/bin/ratis-kv \
       --id ${node} --peers ${PEERS} --storage ${STORAGE_DIR} \
       > ${LOG_FILE} 2>&1 & echo \$! > ${PID_FILE}"
 done
+SERVERS_STARTED=1
 
 # --- (a) contract startup line in all five logs ----------------------------
-say "check (a): startup line in all five logs (deadline ${STARTUP_DEADLINE}s)"
+step "check (a): startup line in all five logs (deadline ${STARTUP_DEADLINE}s)"
 for node in "${SERVERS[@]}"; do
   deadline=$((SECONDS + STARTUP_DEADLINE))
   until on_node "${node}" "grep -q '${STARTUP_LINE}' ${LOG_FILE} 2>/dev/null"; do
@@ -119,7 +156,7 @@ done
 say "PASS (a): startup line present on all five nodes"
 
 # --- (b) exactly one current leader ----------------------------------------
-say "check (b): exactly one current leader (deadline ${LEADER_DEADLINE}s)"
+step "check (b): exactly one current leader (deadline ${LEADER_DEADLINE}s)"
 # A node counts as leader iff the LAST role-transition line in its log is a
 # transition to LEADER — current leadership, not election history. A node
 # that lost leadership has a later 'LEADER to FOLLOWER' line and no longer
@@ -167,7 +204,7 @@ say "  [${LEADERS[0]}] $(on_node "${LEADERS[0]}" \
 say "PASS (b): exactly one node (${LEADERS[0]}) is currently LEADER"
 
 # --- (c) port 6000 listening on all five nodes -----------------------------
-say "check (c): port 6000 listening on all five nodes"
+step "check (c): port 6000 listening on all five nodes"
 for node in "${SERVERS[@]}"; do
   line=$(on_node "${node}" "ss -ltn | grep ':6000 '") \
     || { dump_log_tail "${node}"; fail "(c) ${node} is not listening on 6000"; }
@@ -176,7 +213,7 @@ done
 say "PASS (c): port 6000 listening on all five nodes"
 
 # --- (d) clean stop via SIGTERM --------------------------------------------
-say "check (d): SIGTERM stops all five servers (deadline ${STOP_DEADLINE}s)"
+step "check (d): SIGTERM stops all five servers (deadline ${STOP_DEADLINE}s)"
 for node in "${SERVERS[@]}"; do
   on_node "${node}" "kill -TERM \$(cat ${PID_FILE})"
 done

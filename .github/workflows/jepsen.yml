@@ -1,0 +1,201 @@
+# Copyright 2026 the ratis-jepsen authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Jepsen sweep (DESIGN 4, Job 06). Manual dispatch ONLY — no cron/schedule:
+# owner decision 2026-08-04, test cadence stays manual until the planned
+# donation offer to the Apache Ratis project, whose maintainers would set
+# their own schedule.
+#
+#   build-sut  build the SUT tarball once; parse the scenarios input
+#   test       one runner per scenario: run.sh up + run.sh test
+#   red-gate   test-of-the-test: a seeded-bug run that must FAIL the harness
+#
+# Every job uploads its (compressed) jepsen store/ as an artifact, pass or
+# fail, retained 7 days.
+
+name: jepsen
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: >-
+          Comma-separated nemesis scenarios, one matrix runner each
+          (valid values = the harness's --nemesis kinds)
+        type: string
+        required: false
+        default: none,partition
+      time-limit:
+        description: Workload seconds per scenario run (harness --time-limit)
+        type: string
+        required: false
+        default: '300'
+
+permissions:
+  contents: read
+
+# One sweep at a time per ref; later dispatches queue instead of overlapping.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-sut:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      scenarios: ${{ steps.parse.outputs.scenarios }}
+    steps:
+      # Validate inputs and turn the comma-list into a JSON array for the
+      # test matrix. Blank entries are dropped, duplicates collapsed (a
+      # duplicate scenario would collide on the store artifact name); an
+      # effectively empty list falls back to the documented default.
+      - name: Parse the scenarios input
+        id: parse
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+          TIME_LIMIT: ${{ inputs.time-limit }}
+        run: |
+          case "${TIME_LIMIT}" in
+            ''|*[!0-9]*)
+              echo "::error::time-limit must be a positive integer, got '${TIME_LIMIT}'"
+              exit 1 ;;
+          esac
+          list=$(jq -cn 'env.SCENARIOS | split(",")
+                         | map(gsub("^\\s+|\\s+$"; ""))
+                         | map(select(length > 0)) | unique')
+          if [ "${list}" = "[]" ]; then
+            list='["none","partition"]'
+            echo "scenarios input was empty; using the default"
+          fi
+          echo "scenarios=${list}" >> "${GITHUB_OUTPUT}"
+          echo "matrix scenarios: ${list}"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: sut/ratis-kv/pom.xml
+      # Module path on purpose — there is no repo-root Maven wrapper
+      # (BACKLOG item 6).
+      - name: Build the SUT tarball
+        run: sut/ratis-kv/mvnw -f sut/ratis-kv/pom.xml -q package
+      - name: Upload the SUT tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: sut-tarball
+          path: sut/ratis-kv/target/ratis-kv-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    needs: build-sut
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      # Scenarios are independent evidence; never cancel one because a
+      # sibling failed.
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(needs.build-sut.outputs.scenarios) }}
+    steps:
+      - uses: actions/checkout@v4
+      # Landing the tarball under sut/ratis-kv/target/ makes run.sh test
+      # skip its build-inside-control fallback.
+      - name: Download the SUT tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: sut-tarball
+          path: sut/ratis-kv/target
+      - name: Bring the topology up
+        run: env/run.sh up
+      # The harness exit code is the verdict (0 = checker valid) and,
+      # uncaught, becomes the step's.
+      - name: Run the harness (nemesis ${{ matrix.scenario }})
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          TIME_LIMIT: ${{ inputs.time-limit }}
+        run: env/run.sh test --nemesis "${SCENARIO}" --time-limit "${TIME_LIMIT}"
+      # store/ is written by root inside the container; tar as root rather
+      # than fight ownership on the runner.
+      - name: Compress the store
+        if: always()
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+        run: |
+          if [ -d store ]; then
+            sudo tar -czf "store-${SCENARIO}.tar.gz" store
+          else
+            echo "no store/ directory — the run died before the harness wrote anything"
+          fi
+      - name: Upload the store
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-${{ matrix.scenario }}
+          path: store-*.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
+
+  # The CI-encoded test-of-the-test (DESIGN 5; the RUNS.md red reference,
+  # runs in every sweep): against a SUT seeded with the stale-reads bug the
+  # harness MUST fail, with a checker conviction as evidence. If this job
+  # goes red the harness has gone blind — do not trust the sweep's greens.
+  red-gate:
+    needs: build-sut
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the SUT tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: sut-tarball
+          path: sut/ratis-kv/target
+      - name: Bring the topology up
+        run: env/run.sh up
+      - name: Seeded run — passes iff the harness fails
+        run: |
+          rc=0
+          env/run.sh test --nemesis partition --time-limit 120 \
+            --seed-bug stale-reads || rc=$?
+          echo "red-gate: harness exit code ${rc}"
+          if [ "${rc}" -eq 0 ]; then
+            echo "::error::red-gate: seeded stale-reads run exited 0 — the harness no longer catches the planted bug"
+            exit 1
+          fi
+          evidence=$(sudo grep -Rl --include=results.edn -- ':valid? false' store/ || true)
+          if [ -z "${evidence}" ]; then
+            echo "::error::red-gate: harness exited ${rc} but no results.edn contains ':valid? false' — not a checker conviction (infrastructure failure?)"
+            exit 1
+          fi
+          echo "red-gate: ':valid? false' evidence found in:"
+          echo "${evidence}"
+      - name: Compress the store
+        if: always()
+        run: |
+          if [ -d store ]; then
+            sudo tar -czf store-red-gate.tar.gz store
+          else
+            echo "no store/ directory — the run died before the harness wrote anything"
+          fi
+      - name: Upload the store
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-red-gate
+          path: store-red-gate.tar.gz
+          if-no-files-found: warn
+          retention-days: 7
