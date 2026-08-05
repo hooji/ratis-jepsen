@@ -254,8 +254,10 @@ exceptions before any cluster run trusts it.
 
 ## 4. CI shape (lands in M1 — after the repo goes public, per PLAN Q7)
 
-Recorded now so M0 doesn't foreclose it: `workflow_dispatch` (+ nightly
-cron once public) with inputs `ratis-version`, `scenario`, `time-limit`;
+Recorded now so M0 doesn't foreclose it: `workflow_dispatch` **only —
+no cron** (owner, 2026-08-04: cadence stays manual until the planned
+donation offer to the Ratis project, whose maintainers set their own
+schedule) with inputs `ratis-version`, `scenario`, `time-limit`;
 jobs = build SUT tarball once (upload as artifact), then a **matrix job per
 scenario** pulling the tarball, `env/run.sh up && test`, always-upload
 `store/**` (compressed) with a sane retention, `timeout-minutes: 60`.
