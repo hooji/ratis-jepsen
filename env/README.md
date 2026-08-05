@@ -11,7 +11,9 @@ SSH.
 ```
 env/run.sh up        # build image (cached), start compose, wait for ssh on all 7 nodes
 env/run.sh down      # stop and remove containers, network, volumes; idempotent
-env/run.sh test      # stub until Job 04 (exits 64)
+env/run.sh test      # run the harness on control; args pass through
+                     # (--nemesis, --time-limit, --seed-bug, ...) and the
+                     # harness exit code is the verdict (0 = checker valid)
 env/validate.sh      # end-to-end proof: SUT build on control, 5-node boot,
                      # exactly one *current* leader (last role transition
                      # per node), ports, clean SIGTERM stop
@@ -29,7 +31,7 @@ Knobs (environment variables):
 | Variable | Meaning |
 |---|---|
 | `RJ_SSH_READY_TIMEOUT` | seconds to wait per node for sshd (default 120) |
-| `RJ_EXTRA_CA_BUNDLE` | path to a PEM file with the proxy's CA certificate(s), baked into the image's system + JVM trust stores — needed on hosts whose egress is TLS-inspected (corporate/CI proxies). Pass just the extra CA(s), not a full system bundle: the content travels as a build-arg, which caps its size |
+| `RJ_EXTRA_CA_BUNDLE` | path to a PEM file with the proxy's CA certificate(s), baked into the image's system **and** JVM trust stores — needed on hosts whose egress is TLS-inspected (corporate/CI proxies). Multi-cert bundles are fully supported: the Dockerfile splits the bundle one-cert-per-file, because Debian's JVM-keystore hook imports only the first cert of a file. Still pass just the extra CA(s), not a full system bundle: the content travels as a single docker build-arg, so `run.sh` pre-flights the file (readable, contains a PEM cert, ≤ 64 KiB) and refuses oversized input before docker can fail with a cryptic `Argument list too long` |
 | `RJ_DOCKER_BUILD_ARGS` | extra arguments appended verbatim to `docker build` |
 | `RJ_STARTUP_DEADLINE`, `RJ_LEADER_DEADLINE`, `RJ_LEADER_SETTLE`, `RJ_STOP_DEADLINE` | validate.sh deadlines (seconds) |
 
@@ -38,6 +40,14 @@ Network note: the image build (apt + Clojure CLI download) and the first
 a named volume for the rest of the up-cycle) need outbound network access.
 Behind a TLS-inspecting proxy, point `RJ_EXTRA_CA_BUNDLE` at the proxy's CA
 bundle before `run.sh up`.
+
+`maven-repo` volume lifecycle: the named volume mounted at `/root/.m2` on
+`control` persists Maven and Clojure dependency downloads across container
+recreations *within* one up-cycle — that is why the second `validate.sh`
+or `test` run in a cycle skips the big downloads and is much faster —
+while `run.sh down` removes it (`down --volumes`), so successive up-cycles
+share no state and stay hermetic: fast within a cycle, cold across cycles
+— by design, not by accident.
 
 The repository is bind-mounted read-write at `/ratis-jepsen` on `control`
 only. Builds run inside `control` as root, so `sut/ratis-kv/target/` on the
