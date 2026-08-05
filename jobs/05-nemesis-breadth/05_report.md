@@ -449,7 +449,44 @@ Ran 53 tests containing 624 assertions.
 
 ### Gate re-runs on the revised code (revision 4)
 
-<!-- REV MATRIX TABLE -->
+`env/run.sh test --nemesis <kind> --time-limit 300` per row; **8/8 as
+required** — seven green, seeded-red still convicting:
+
+| Run | Exit | Wall | Analysis | ok / fail / info | Store (`20260805T…`) |
+|---|---|---|---|---|---|
+| mixed #1 | 0 | 343 s | 0.5 s | 1105 / 381 / 14 | `…mixed/140406.555Z` |
+| mixed #2 | 0 | 315 s | 0.5 s | 1086 / 404 / 10 | `…mixed/140929.564Z` |
+| mixed #3 | 0 | 316 s | 0.3 s | 1084 / 416 / 0 | `…mixed/141444.860Z` |
+| crash #1 | 0 | 317 s | 0.35 s | 1107 / 393 / 0 | `…crash/142001.226Z` |
+| crash #2 | 0 | 317 s | 0.54 s | 1089 / 394 / 17 | `…crash/142517.701Z` |
+| pause | 0 | 316 s | 0.3 s | 1082 / 415 / 3 | `…pause/143035.407Z` |
+| partition | 0 | 315 s | 0.3 s | 1089 / 408 / 3 | `…partition/143551.251Z` |
+| crash + seed-bug | **1** | 317 s | 0.4 s | 1110 / 380 / 10 | `…crash-seedbug-stale-reads/144105.762Z` |
+
+- **The false-red class did not reproduce**: `mixed` ×3 (drawing 4/4/2,
+  2/6/2, 7/2/1 crash/pause/partition segments — 5 partition-heal
+  elections between them) plus the dedicated `partition` run (10 more)
+  all green. Intermittent-by-nature (~1-in-3 in review), so this is the
+  requested evidence bar, not a proof.
+- **Fewer `:info`, as the reviewer predicted**: 44 total across the
+  seven green runs vs 60 across the four pre-revision runs — retries
+  resolve most transients to definitive outcomes. Every remaining
+  `:info` is inside a fault window (crash #2: 17/17; mixed #1: 14/14;
+  crash #1 had zero at all); calm phases stay silent.
+- **No knossos regression**: analysis sub-second in every run (the
+  reviewer's ~5-minute escalation threshold was never approached), so
+  the Job 04 budget lever stays untouched.
+- **Seeded-red still convicts on all five keys**, violation verbatim
+  (key 3: a committed `cas [3 2]`, then a stale read):
+
+  ```
+  {:op {:process 1, :type :ok, :f :cas,  :value [3 2], :index 88,  :time 2879841899}}
+  {:op {:process 1, :type :ok, :f :read, :value 1,     :index 109, :time 3022093087},
+   :model #knossos.model.Inconsistent{:msg "can't read 1 from register 2"}}
+  ```
+
+Ledger entries for all eight runs: `docs/RUNS.md`, "M1 revision-1 gate
+re-runs".
 
 ## Deviations, revised
 

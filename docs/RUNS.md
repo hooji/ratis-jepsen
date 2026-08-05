@@ -127,3 +127,40 @@ violating pair, verbatim: process 0 wrote 2, then read the stale 3:
 (1022 `:ok` / 427 `:fail` / 51 `:info` — stale reads still *acknowledge*,
 so the liveness checker rightly stays `:valid? true`; linearizability is
 what convicts.)
+
+## 2026-08-05 — M1 revision-1 gate re-runs (Job 05 / Review 05 amendment)
+
+- **Code under test**: the ratified DESIGN §2.4 / PLAN Q3 amendment —
+  bounded same-callId client retries (4 × 200 ms); write-path
+  NotLeaderException / LeaderNotReadyException / null-cause
+  RaftRetryFailureException graded `:info` (were `:fail`, which Review 05
+  proved could false-red a healthy cluster: a deposed leader's appended
+  writes commit under its successor; preserved review store
+  `ratis-kv-register-mixed/20260805T061642.433Z`).
+- **Command**: `env/run.sh test --nemesis <kind> --time-limit 300` per row
+- **Versions**: ratis 3.2.2, jepsen 0.3.13, SUT `ratis-kv 0.1.0-SNAPSHOT`, JDK 21
+
+| Run | Exit | Wall | Analysis | ok / fail / info | Store (`20260805T…`) |
+|---|---|---|---|---|---|
+| mixed #1 | 0 | 343 s | 0.5 s | 1105 / 381 / 14 | `…mixed/140406.555Z` |
+| mixed #2 | 0 | 315 s | 0.5 s | 1086 / 404 / 10 | `…mixed/140929.564Z` |
+| mixed #3 | 0 | 316 s | 0.3 s | 1084 / 416 / 0 | `…mixed/141444.860Z` |
+| crash #1 | 0 | 317 s | 0.35 s | 1107 / 393 / 0 | `…crash/142001.226Z` |
+| crash #2 | 0 | 317 s | 0.54 s | 1089 / 394 / 17 | `…crash/142517.701Z` |
+| pause | 0 | 316 s | 0.3 s | 1082 / 415 / 3 | `…pause/143035.407Z` |
+| partition | 0 | 315 s | 0.3 s | 1089 / 408 / 3 | `…partition/143551.251Z` |
+| crash + seed-bug | **1** | 317 s | 0.4 s | 1110 / 380 / 10 | `…crash-seedbug-stale-reads/144105.762Z` |
+
+All seven green runs `:valid? true` (liveness included); the seeded-red
+still convicts on **all five keys** (key 3's pair: a committed
+`cas [3 2]` at index 88, then a stale read of `1` at index 109 —
+`can't read 1 from register 2`). `mixed` was run ×3 because the
+false-red is intermittent (~1-in-3 in review); the three runs drew
+4/4/2, 2/6/2 and 7/2/1 crash/pause/partition segments — 5 partition-heal
+elections across them plus 10 more in the dedicated partition run, the
+exact racing shape of the old defect, all green. The retries resolve
+transients definitively: `:info` totals collapsed (44 across all seven
+green runs vs 60 in the four pre-revision runs), every remaining `:info`
+sits inside a fault window (crash #2: 17/17 inside; mixed #1: 14/14
+inside), and knossos analysis stayed sub-second everywhere — no
+regression toward the review's 4-core 20-minute outlier.
