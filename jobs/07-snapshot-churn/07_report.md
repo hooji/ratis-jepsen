@@ -90,6 +90,30 @@ storm below) and `followerNextIndex = 2447 but logStartIndex = 2506`
 observed phrasings; the `notifyInstallSnapshot` wording the API name
 suggests never occurs for our direct-streaming state machine.
 
+## The second discovery: LeaderSteppingDownException had no outcome row
+
+The first `snapshot-churn` gate attempt at 300 s exposed a second
+never-reachable-before-M2 path: my churn run 2 exited **2**
+(`:valid? :unknown`) after a 924 s wall — knossos ran out of memory on
+key 0. The trigger: the run's history carried **147
+`LeaderSteppingDownException` completions**, an exception the outcome
+map had no row for (nothing transferred leadership before this job), so
+each landed in the unknown-throwable pessimism bucket — `:info` + loud —
+and the `:info` flood pushed the linear checker over its documented
+memory cliff. Triage against ratis-3.2.2 source: the exception has a
+**single construction site**, the pre-append admission check
+(`RaftServerImpl.checkLeaderState`) a transferring leader applies to new
+write requests — the request is *never appended* (pending appended
+requests are completed with `NotLeaderException` instead, which is
+exactly why the Review-05 amendment keeps *that* row `:info` while this
+one is a definite `:fail`). Reads cannot receive it at all
+(`isReadOnly()` skips the check). The new row + unit tests landed, and
+the re-run went green with sub-second analysis (criterion 2 table). The
+OOM'd run is preserved:
+`…snapshot-churn/20260805T172714.309Z` (its own checkers that did
+complete — stats, liveness, evidence — were all valid; only the
+linearizability analysis died).
+
 ## Live-territory observation (brief's "hunting" clause)
 
 During shakedown 3, follower n2 restarted while the leader n5 already
@@ -112,7 +136,20 @@ JDK 21. Commands from the repo root.
 
 ### Criterion 1 — `clojure -M:test` green
 
-<!-- TESTS -->
+```
+$ cd harness && clojure -M:test
+Ran 61 tests containing 652 assertions.
+0 failures, 0 errors.        (exit 0)
+```
+
+Was 53/624 after Job 05 revision 1. New: churn/transfer segment and
+cadence tests, five-kind mixed-all interleave
+(`mixed-all-interleaves-all-five-kinds`), evidence
+counting/verdict/gating (`install-snapshot-evidence-counting` carries
+the observed verbatim log lines as fixtures — zero and nonzero cases),
+`follower-candidates-selection`, and `row-leader-stepping-down` (the
+outcome-map row this job's transfers made reachable — see "The second
+discovery" below). No regressions.
 
 ### Criterion 2 — snapshot-churn ×2 green with evidence counts
 
