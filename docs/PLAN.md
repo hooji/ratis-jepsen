@@ -288,11 +288,15 @@ constrain everything downstream and should be settled first.
 
 ## 7. Immediate next steps
 
-*(updated 2026-08-04 (later): **M0 complete** — jobs 01–04 merged through
+*(updated 2026-08-05: **M1 complete** — jobs 05 (nemesis breadth +
+liveness; incl. the Review-05-discovered outcome-map false-red, fixed
+via ratified same-callId-retry amendment) and 06 (manual-dispatch CI
+with red-gate, env polish, public README) merged; first full
+five-scenario CI sweep dispatched on hosted runners. **M2 underway**:
+job 07 snapshot churn + transfer + follower reads; job 08 membership
+churn to follow. Earlier: **M0 complete** — jobs 01–04 merged through
 the review protocol; both exit-gate runs reproduced independently by
-review (green ×2 stable, seeded-red caught); repository flipped public;
-M1 underway: job 05 nemesis-breadth + liveness checking ∥ job 06 CI +
-env polish. Earlier status: Q1/Q4/Q5 decided; Q7 settled — Docker 5+1,
+review (green ×2 stable, seeded-red caught); repository flipped public. Earlier status: Q1/Q4/Q5 decided; Q7 settled — Docker 5+1,
 dual-target dev/GHA — with only the FUSE-for-lazyfs spike left open,
 gating M4 only.)*
 
