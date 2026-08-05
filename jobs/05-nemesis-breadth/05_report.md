@@ -112,23 +112,78 @@ tests unchanged and green.
 
 ### Criterion 2 — green runs: crash ×2, pause, mixed (300 s each)
 
-*(table below; each run: `env/run.sh up` once, then
-`env/run.sh test --nemesis <kind> --time-limit 300`)*
+`env/run.sh up` once, then `env/run.sh test --nemesis <kind>
+--time-limit 300` per run; every run `:valid? true`, exit 0,
+"Everything looks good!", liveness checker composed in and valid:
 
-<!-- MATRIX TABLE -->
+| Run | Exit | Wall | knossos analysis | ok / fail / info | Store |
+|---|---|---|---|---|---|
+| crash #1 | 0 | 328 s | 5.4 s | 1057 / 408 / 35 | `ratis-kv-register-crash/20260805T044717.351Z` |
+| crash #2 | 0 | 322 s | 2.1 s | 1036 / 439 / 25 | `ratis-kv-register-crash/20260805T045245.825Z` |
+| pause | 0 | 322 s | 0.7 s | 1098 / 402 / 0 | `ratis-kv-register-pause/20260805T045807.172Z` |
+| mixed | 0 | 326 s | 1.7 s | 1068 / 432 / 0 | `ratis-kv-register-mixed/20260805T050331.288Z` |
+
+(1500 ops each: 5 keys × 300. Analysis times from the jepsen.log
+`Analyzing…`/`Analysis complete` pair, e.g. crash #1
+`04:52:33,068 → 04:52:38,427`.) Crash runs: ten kill cycles each,
+killed nodes `:started` on restart vs `:already-running` for the rest;
+leader-bias observed working (e.g. in the pre-matrix shakedown run the
+then-current leader was killed in both cycles — n3 at term 1, then the
+new leader n1 at term 2). Pause run: ten SIGSTOP cycles, all outcomes
+definite (see the ledger for the term-2 election the final leader-pause
+produced). Mixed run: ten whole segments, drawn 5 partition / 4 pause /
+1 crash this run — uniform draws, small n. Per-run detail lives in
+`docs/RUNS.md`.
 
 ### Criterion 3 — seeded-red under crash
 
-<!-- RED RUN -->
+```
+$ env/run.sh test --nemesis crash --time-limit 300 --seed-bug stale-reads
+...
+Analysis invalid! (ﾉಥ益ಥ）ﾉ ┻━┻
+exit 1        (333 s wall)
+```
+
+`:valid? false` with `:failures [0 1 2 3 4]` — every key convicted —
+while ten kill cycles land and restarted nodes rejoin with the bug still
+active (the `*** SEEDED BUG ACTIVE: stale-reads ***` banner reappears in
+every node's log after every restart: the flag rides the same `db.clj`
+start path the crash nemesis reuses). Key 0's violating pair, verbatim
+(process 0 wrote 2, then read the ~500 ms-stale 3):
+
+```
+{:op {:process 0, :type :ok, :f :write, :value 2, :index 105, :time 4396595457}}
+{:op {:process 0, :type :ok, :f :read,  :value 3, :index 116, :time 4527382074},
+ :model #knossos.model.Inconsistent{:msg "can't read 3 from register 2"}}
+```
+
+Store: `ratis-kv-register-crash-seedbug-stale-reads/20260805T050901.890Z`.
+(Stale reads still *acknowledge*, so the liveness checker rightly stays
+valid; linearizability convicts.)
 
 ### Criterion 4 — outcome mapping under crash (`:info` vs kill windows)
 
 Method (same as Job 04, now against crash windows): a window opens at a
 `:crash` op's invocation and closes at its `:restart` op's completion;
 each client `:info` completion is inside a window, adjacent (≤ 5 s — one
-harness invocation timeout — after close), or outside.
+harness invocation timeout — after close), or outside. Analysis script
+output over the two green crash runs:
 
-<!-- INFO WINDOWS -->
+| Run | `:info` total | inside | adjacent ≤5 s | outside |
+|---|---|---|---|---|
+| crash #1 | 35 | **35** | 0 | 0 |
+| crash #2 | 25 | **25** | 0 | 0 |
+
+```
+fault windows: [[:crash 20.44 30.84] [:crash 50.89 62.67] ... [:crash 294.91 nil]]
+client :info completions: 35 -> {:inside 35}
+```
+
+Calm phases are completely quiet; reads carry zero `:info` in every run
+(the outcome map forbids it). The liveness checker's reported
+`:calm-regions-s` for the same runs mirror these windows from the other
+side (e.g. `[[0.438 20.444] [45.839 50.889] …]` — fault start to heal
+completion + 15 s grace excluded).
 
 ### Criterion 5 — fabricated-stall demonstration
 
