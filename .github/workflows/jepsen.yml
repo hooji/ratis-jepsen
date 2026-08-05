@@ -35,7 +35,7 @@ on:
           (valid values = the harness's --nemesis kinds)
         type: string
         required: false
-        default: none,partition
+        default: none,partition,crash,pause,mixed,snapshot-churn,transfer,mixed-all
       time-limit:
         description: Workload seconds per scenario run (harness --time-limit)
         type: string

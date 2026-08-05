@@ -45,6 +45,8 @@
   |    see below)                              |                 |       |
   | RaftRetryFailureException, non-null cause  | :info           | :fail |
   | ResourceUnavailableException               | :fail           | :fail |
+  | LeaderSteppingDownException                | :fail (pre-append admission
+  |   reject during transfer; single throw site — see row comment) | :fail + loud (cannot happen) |
   | GroupMismatchException                     | :fail + loud (setup bug)   | same |
   | StateMachineException                      | :fail + loud (SUT bug in M0) | same |
   | ReadException / ReadIndexException         | (write: cannot happen —    | :fail |
@@ -96,6 +98,7 @@
              AlreadyClosedException
              GroupMismatchException
              LeaderNotReadyException
+             LeaderSteppingDownException
              NotLeaderException
              RaftException
              RaftRetryFailureException
@@ -229,6 +232,20 @@
 
       ;; Definite not-appended: admission control rejects pre-append.
       ResourceUnavailableException (definite-fail :resource-unavailable)
+
+      ;; Definite not-appended (M2, reached by leadership transfers):
+      ;; thrown ONLY by the pre-append admission check
+      ;; (RaftServerImpl.checkLeaderState, single construction site at
+      ;; 3.2.2) while a leader hands off — the request was never
+      ;; appended, and pending appended requests are completed with
+      ;; NotLeaderException instead (which is why THAT row is :info and
+      ;; this one is :fail). The isReadOnly() guard means reads can
+      ;; never legally receive it; treat that impossibility with
+      ;; pessimism like the ReadException-on-write rows.
+      LeaderSteppingDownException
+      (if (write-kind? op-kind)
+        (definite-fail :leader-stepping-down)
+        (unknown-throwable op-kind t))
 
       ;; Definite, but also a bug in the test setup or the SUT — flag the
       ;; run loudly (DESIGN 2.4).

@@ -15,17 +15,26 @@
 (ns ratis-jepsen.core
   "CLI entry and test-map assembly (DESIGN 2.1).
 
-  M1 shape: the register workload over independent keys, a fault schedule
+  M2 shape: the register workload over independent keys, a fault schedule
   chosen by --nemesis, knossos linearizability checking per key plus the
-  whole-history liveness checker. `clojure -M:run test --help` for the
-  options; the interesting ones:
+  whole-history liveness checker (and, for snapshot-churn runs, the
+  install-snapshot evidence checker). `clojure -M:run test --help` for
+  the options; the interesting ones:
 
-    --workload register        (the only workload until M2/M3)
-    --nemesis none|partition|crash|pause|mixed
+    --workload register        (the only workload until M3)
+    --nemesis none|partition|crash|pause|mixed|snapshot-churn|transfer|mixed-all
                                fault schedule (default none); crash =
                                kill -9/restart of a leader-biased random
-                               minority, pause = SIGSTOP/SIGCONT, mixed
-                               interleaves all three at equal weight
+                               minority, pause = SIGSTOP/SIGCONT,
+                               snapshot-churn = kill a follower + snapshot
+                               and purge live servers + restart it
+                               (forcing install-snapshot), transfer =
+                               periodic leadership transfer, mixed = the
+                               M1 three, mixed-all = all five
+    --reads leader|follower|mixed
+                               where linearizable reads go (default
+                               leader; follower exercises
+                               sendReadOnly(msg, peerId))
     --time-limit 300           wall-clock ceiling; the op budget usually
                                exhausts first
     --key-count 5 --ops-per-key 400 --concurrency 10   the DESIGN 2.5
@@ -79,6 +88,40 @@
    [nil "--pause-fault-s SECONDS" "Pause cycle: how long processes stay stopped"
     :default (:fault-s nemesis/default-pause-cycle)
     :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--churn-calm-s SECONDS" "Snapshot-churn cycle: calm stretch before each follower kill"
+    :default (:calm-s nemesis/default-churn-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--churn-kill-to-transfer-s SECONDS" "Snapshot-churn cycle: gap between the kill and the leadership transfer (the term bump that makes the purge real)"
+    :default (:kill-to-transfer-s nemesis/default-churn-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--churn-transfer-to-snapshot-s SECONDS" "Snapshot-churn cycle: writes window between the transfer and the snapshot trigger"
+    :default (:transfer-to-snapshot-s nemesis/default-churn-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--churn-snapshot-to-restart-s SECONDS" "Snapshot-churn cycle: gap between the snapshot trigger and the follower restart"
+    :default (:snapshot-to-restart-s nemesis/default-churn-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--transfer-calm-s SECONDS" "Transfer cycle: gap between leadership transfers"
+    :default (:calm-s nemesis/default-transfer-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--reads MODE" "Where linearizable reads are sent: leader (sendReadOnly, M0 behavior), follower (sendReadOnly to a non-leader peer), or mixed (50/50)"
+    :default "leader"
+    :validate [#{"leader" "follower" "mixed"} "Must be: leader, follower or mixed"]]
+
+   [nil "--rate OPS-PER-SECOND" "Approximate ops per second per worker (default 10, the M0 behavior). Snapshot-churn runs lower this so writes keep flowing across the whole run instead of exhausting the op budget early."
+    :default 10.0
+    :parse-fn #(Double/parseDouble %)
     :validate [pos? "Must be positive"]]
 
    [nil "--key-count NUMBER" "How many independent register keys to run through"

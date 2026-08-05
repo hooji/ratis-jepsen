@@ -23,12 +23,18 @@
     soundness argument and the history);
   - ops {:f :read} / {:f :write} / {:f :cas} map 1:1 onto the DESIGN 1.4
     wire protocol (GET / PUT / CAS); writes travel client.io().send,
-    reads client.io().sendReadOnly;
+    reads client.io().sendReadOnly — leader-routed by default, or
+    follower-targeted via sendReadOnly(msg, peerId) when the test runs
+    --reads follower|mixed (M2: the linearizable follower-read path);
   - every invocation is wrapped in a harness-side timeout
     (`invoke-timeout-ms`, sitting above the library's 3 s default client
     rpc timeout), classified :info for writes / :fail for reads;
   - op :value comes through jepsen.independent tuples [k v]; keys are
-    stringified as-is onto the wire."
+    stringified as-is onto the wire.
+
+  Also here (M2): the admin interop the snapshot-churn and transfer
+  nemeses use — per-server snapshot creation and leadership transfer —
+  because this namespace owns all RaftClient construction and calls."
   (:require [jepsen.client :as jc]
             [jepsen.independent :as independent]
             [ratis-jepsen.env-contract :as env]
@@ -37,7 +43,7 @@
            (org.apache.ratis.client RaftClient)
            (org.apache.ratis.conf RaftProperties)
            (org.apache.ratis.protocol Message RaftClientReply RaftGroup
-                                      RaftGroupId RaftPeer)
+                                      RaftGroupId RaftPeer RaftPeerId)
            (org.apache.ratis.retry RetryPolicies)
            (org.apache.ratis.util TimeDuration)))
 
@@ -92,6 +98,35 @@
 ;; RaftClient interop
 ;; ---------------------------------------------------------------------------
 
+(defn node-addresses
+  "The id→host:port map for the given node names at the contract raft
+  port — the group spec every client (worker and nemesis-admin alike)
+  is built from."
+  [nodes]
+  (into {} (map (fn [n] [n (str n ":" env/raft-port)])) nodes))
+
+(defn follower-candidates
+  "The peers a follower-targeted read may go to: everyone except the
+  believed leader — or every peer when the leader is unknown (nil) or
+  not in the peer list. Pure; the belief comes from
+  RaftClient.getLeaderId, which is best-effort by nature."
+  [peers leader]
+  (let [cands (vec (remove #{leader} peers))]
+    (if (seq cands) cands (vec peers))))
+
+(defn- pick-read-target
+  "Where a :read goes: nil = leader-routed sendReadOnly (M0 behavior);
+  a node name = follower-targeted sendReadOnly(msg, peerId). :follower
+  always targets a non-leader; :mixed does so for half the reads."
+  [^RaftClient client peers mode]
+  (case mode
+    :leader   nil
+    :follower (rand-nth (follower-candidates
+                          peers (some-> (.getLeaderId client) str)))
+    :mixed    (when (< (rand) 0.5)
+                (rand-nth (follower-candidates
+                            peers (some-> (.getLeaderId client) str))))))
+
 (defn raft-group
   "The SUT's raft group: the fixed group uuid (env-contract, copied from
   the SUT's Main.GROUP_UUID) over the given id→host:port peers."
@@ -145,21 +180,27 @@
 
 (defn- send-request
   "Sends one wire request through the client on the op's path and returns
-  the decoded reply string."
-  ^String [^RaftClient client f ^String request]
+  the decoded reply string. A non-nil read-target sends the read
+  follower-targeted (still the linearizable path: the follower obtains a
+  ReadIndex from the leader before answering)."
+  ^String [^RaftClient client f ^String request read-target]
   (let [message (Message/valueOf request)
-        ^RaftClientReply reply (if (write-path? f)
-                                 (.send (.io client) message)
-                                 (.sendReadOnly (.io client) message))]
+        ^RaftClientReply reply
+        (cond
+          (write-path? f) (.send (.io client) message)
+          read-target     (.sendReadOnly (.io client) message
+                                         (RaftPeerId/valueOf
+                                           ^String read-target))
+          :else           (.sendReadOnly (.io client) message))]
     (-> reply .getMessage .getContent .toStringUtf8)))
 
 (defn- invoke-raw
   "Runs one invocation under the harness-side deadline. Returns the reply
   string, or throws: the raw failure (unwrapped by the outcome map), or
   java.util.concurrent.TimeoutException when the deadline fires first."
-  [^RaftClient client {:keys [f] :as op}]
+  [^RaftClient client {:keys [f] :as op} read-target]
   (let [request (op->request op)
-        fut     (future (send-request client f request))
+        fut     (future (send-request client f request read-target))
         result  (deref fut invoke-timeout-ms ::timed-out)]
     (if (= result ::timed-out)
       (do (future-cancel fut)
@@ -169,20 +210,67 @@
       result)))
 
 ;; ---------------------------------------------------------------------------
+;; Admin interop (M2 nemeses: snapshot churn, leadership transfer)
+;; ---------------------------------------------------------------------------
+
+(def admin-timeout-ms
+  "Request timeout for nemesis admin calls (snapshot create, leadership
+  transfer). These run on the nemesis thread with no harness deadline —
+  a slow call just stretches its fault segment."
+  10000)
+
+(defn snapshot-create!
+  "Asks `node` to take a snapshot now (SnapshotManagementApi.create,
+  routed per-server as the API requires). Returns the reply's success
+  flag + index for the history record — NEVER trusted as proof a
+  snapshot exists (BACKLOG item 5: the API can report success while
+  takeSnapshot failed); the install-snapshot evidence checker judges
+  from logs. Throws on transport/timeout errors — callers record and
+  tolerate."
+  [^RaftClient client node]
+  (let [^RaftClientReply reply (-> client
+                                   (.getSnapshotManagementApi
+                                     (RaftPeerId/valueOf ^String node))
+                                   (.create admin-timeout-ms))]
+    {:success? (.isSuccess reply)
+     :index    (.getLogIndex reply)}))
+
+(defn transfer-leadership!
+  "Asks the group to transfer leadership to `node`
+  (AdminApi.transferLeadership). Returns the reply's success flag;
+  throws on failure — TransferLeadershipException on a timed-out or
+  refused handover is a LEGAL outcome the caller records, not a nemesis
+  crash."
+  [^RaftClient client node]
+  (let [^RaftClientReply reply (-> (.admin client)
+                                   (.transferLeadership
+                                     (RaftPeerId/valueOf ^String node)
+                                     admin-timeout-ms))]
+    {:success? (.isSuccess reply)}))
+
+;; ---------------------------------------------------------------------------
 ;; Jepsen client
 ;; ---------------------------------------------------------------------------
 
-(defrecord RatisKvClient [group-spec raft-client]
+(defrecord RatisKvClient [group-spec raft-client reads-mode peers]
   jc/Client
-  (open! [this _test _node]
+  (open! [this test _node]
     ;; One RaftClient per Jepsen process; the group is fixed, so every
     ;; client may talk to any node (the library routes to the leader).
-    (assoc this :raft-client (open-raft-client group-spec)))
+    ;; The read mode comes from the test map (--reads, default leader);
+    ;; follower targets are drawn from the client's own peer set.
+    (assoc this
+           :raft-client (open-raft-client group-spec)
+           :reads-mode  (keyword (or (:reads test) "leader"))
+           :peers       (vec (keys group-spec))))
 
   (setup! [_this _test])
 
   (invoke! [_this _test op]
-    (let [outcome (try (invoke-raw raft-client op)
+    (let [target  (when (= :read (:f op))
+                    (pick-read-target raft-client peers reads-mode))
+          op      (cond-> op target (assoc :read-via target))
+          outcome (try (invoke-raw raft-client op target)
                        (catch Throwable t t))]
       (verdict->op op (outcome/classify! (:f op) outcome))))
 
@@ -196,7 +284,6 @@
   deployment contract's initial voters on the contract raft port; tests
   pass an explicit id→host:port map."
   ([]
-   (client (into {} (map (fn [n] [n (str n ":" env/raft-port)]))
-                 env/initial-voters)))
+   (client (node-addresses env/initial-voters)))
   ([group-spec]
    (map->RatisKvClient {:group-spec group-spec})))

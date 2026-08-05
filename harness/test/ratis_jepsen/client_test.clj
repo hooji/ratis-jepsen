@@ -130,3 +130,18 @@
           op' (client/verdict->op op {:type :fail :error :not-leader})]
       (is (= :fail (:type op')))
       (is (identical? (:value op) (:value op'))))))
+
+;; ---------------------------------------------------------------------------
+;; Follower-read targeting (Job 07) — the pure candidate selection
+;; ---------------------------------------------------------------------------
+
+(deftest follower-candidates-selection
+  (let [peers ["n1" "n2" "n3" "n4" "n5"]]
+    (testing "the believed leader is excluded"
+      (is (= ["n1" "n2" "n4" "n5"] (client/follower-candidates peers "n3"))))
+    (testing "unknown leader (nil): all peers are candidates"
+      (is (= peers (client/follower-candidates peers nil))))
+    (testing "leader not in the peer list: all peers are candidates"
+      (is (= peers (client/follower-candidates peers "n9"))))
+    (testing "degenerate single-peer group: never empty"
+      (is (= ["n1"] (client/follower-candidates ["n1"] "n1"))))))
