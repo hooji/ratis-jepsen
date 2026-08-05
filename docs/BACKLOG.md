@@ -32,7 +32,17 @@ coordinator turns these into jobs when their milestone arrives.*
    repo-root wrapper is provided; briefs/workflows must use the module
    path (Review 01 suggestion 3 resolved this way: no fragile root
    symlink).
-7. **Env hardening (Review 02 round-1 suggestions, 2026-08-04, all
+7. **Upstream-report candidate (elevated): leader retries
+   InstallSnapshot with no backoff.** Job 07 observed ~400 attempts in
+   15.6 s answered by `ServerNotReadyException` during follower reboot;
+   Review 07 reproduced at ~4× that magnitude on a slower environment
+   (2026-08-05). Converges cleanly at n=5, but the hot loop is
+   RATIS-2500-adjacent behavior and burns leader CPU/network exactly
+   when a follower is weakest. Repro recipe + stores referenced in
+   `jobs/07-snapshot-churn/07_report.md` and the review. Action when we
+   engage upstream: file a RATIS issue with the repro; candidate fix is
+   bounded retry/backoff in the leader's snapshot notification path.
+8. **Env hardening (Review 02 round-1 suggestions, 2026-08-04, all
    non-blocking):** multi-cert `EXTRA_CA_B64` split; image/bundle size
    pre-flight check; `trap`-based failure summary in `validate.sh`;
    README note on the `maven-repo` volume lifecycle. Batch into an env
