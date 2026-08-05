@@ -23,15 +23,17 @@
   (5 keys x 400 ops, concurrency 10) generates at most 2000 ops total.
 
   The checker: per-key knossos linearizability against a cas-register
-  model (+ per-key timeline), composed with whole-history perf, stats and
-  unhandled-exceptions."
+  model (+ per-key timeline), composed with the whole-history liveness
+  checker (M1 — a healthy-majority cluster that stops acking flags the
+  run), perf, stats and unhandled-exceptions."
   (:require [clojure.java.shell :as shell]
             [clojure.tools.logging :as log]
             [jepsen.checker :as checker]
             [jepsen.checker.timeline :as timeline]
             [jepsen.generator :as gen]
             [jepsen.independent :as independent]
-            [knossos.model :as model]))
+            [knossos.model :as model]
+            [ratis-jepsen.checker :as rj-checker]))
 
 (def value-range
   "Written/CAS'd values are small ints — keeps CAS preconditions hitting
@@ -93,6 +95,7 @@
                                                {:model     (model/cas-register)
                                                 :algorithm :linear})
                                              :timeline (timeline/html)}))
+                           :liveness   (rj-checker/liveness)
                            :stats      (checker/stats)
                            :exceptions (checker/unhandled-exceptions)}
                     gnuplot? (assoc :perf (checker/perf))))}))
