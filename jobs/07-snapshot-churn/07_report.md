@@ -20,10 +20,16 @@ the op budget in the first ~25 s. All of this is source-verified at
 ratis-3.2.2 and was confirmed by observation before the gates ran.
 `--nemesis transfer` and `--reads leader|follower|mixed` (linearizable
 follower reads via `sendReadOnly(msg, peerId)`) landed as specified;
-`mixed-all` interleaves all five fault kinds. One live-territory
-observation to look at (not a conviction): during follower reboot the
-leader retries InstallSnapshot with no backoff — ~400 attempts in 15.6 s
-answered by `ServerNotReadyException` before converging cleanly.
+`mixed-all` interleaves all five fault kinds. The transfers also
+uncovered a second never-reachable-before path: write-path
+`LeaderSteppingDownException` had no outcome-map row, and its
+pessimistic-`:info` flood drove knossos out of memory in one gate run —
+source triage pinned it as a pre-append admission rejection, so it is
+now a definite `:fail` row (unit-tested; the OOM'd run preserved). One
+live-territory observation to look at (not a conviction): during
+follower reboot the leader retries InstallSnapshot with no backoff —
+~400 attempts in 15.6 s answered by `ServerNotReadyException` before
+converging cleanly.
 
 ## What was built
 
@@ -34,6 +40,7 @@ answered by `ServerNotReadyException` before converging cleanly.
 | `harness/src/ratis_jepsen/checker.clj` | install-snapshot evidence checker: counts observed leader-send/follower-receive log lines from the snarfed store copies; zero evidence in a dedicated churn run ⇒ `:valid? false`, `:error :no-install-snapshot-evidence` |
 | `harness/src/ratis_jepsen/workload/register.clj` | `--rate` (ops/s per worker, default 10 = M0 behavior); evidence checker composed with `:require-evidence?` set for `--nemesis snapshot-churn` |
 | `harness/src/ratis_jepsen/core.clj` | `--nemesis` grows the three kinds; `--reads`; `--rate`; churn/transfer cycle flags |
+| `harness/src/ratis_jepsen/outcome.clj` | new row: `LeaderSteppingDownException` ⇒ definite write `:fail` (pre-append admission rejection, single throw site at 3.2.2 — first reachable via this job's transfers; see "The second discovery") |
 | `harness/test/ratis_jepsen/nemesis_test.clj` | vocabulary, churn/transfer segment shapes + configurable cadence, five-kind mixed-all interleave, package routing |
 | `harness/test/ratis_jepsen/checker_test.clj` | evidence counting against the *observed verbatim* log lines, zero/nonzero verdicts, churn-ops gating |
 | `harness/test/ratis_jepsen/client_test.clj` | follower-candidate selection |
@@ -153,7 +160,32 @@ discovery" below). No regressions.
 
 ### Criterion 2 — snapshot-churn ×2 green with evidence counts
 
-<!-- CHURN RUNS -->
+`env/run.sh test --nemesis snapshot-churn --rate 1.4 --ops-per-key 800
+--time-limit 300`, twice:
+
+| Run | Exit | Wall | Analysis | ok / fail / info | Evidence | Store (`20260805T…`) |
+|---|---|---|---|---|---|---|
+| churn #1 | 0 | 318 s | 0.8 s | 1531 / 550 / 5 | 4 lines = 2 install events | `…snapshot-churn/172157.232Z` |
+| churn #2 | 0 | 320 s | 0.8 s | 1479 / 616 / 0 | 4 lines = 2 install events | `…snapshot-churn/180734.533Z` |
+
+Run #1's first event, verbatim from the node logs (leader-send then
+follower-receive; the checker counts exactly these phrasings):
+
+```
+2026-08-05 17:24:17.537 [n4@group-ABBC16E54704->n3-GrpcLogAppender-LogAppenderDaemon] INFO
+  org.apache.ratis.grpc.server.GrpcLogAppender - n4@group-ABBC16E54704->n3-GrpcLogAppender:
+  followerNextIndex = 1133 but logStartIndex = 1151, send snapshot
+  SingleFileSnapshotInfo(t:6, i:1192):[/var/lib/ratis-kv/…/sm/snapshot.6_1192] to follower
+2026-08-05 17:24:17.584 [grpc-default-executor-0] INFO
+  org.apache.ratis.server.impl.SnapshotInstallationHandler - n3@group-ABBC16E54704:
+  receive installSnapshot: n4->n3#0-t6,chunk:3e1b2d99-44ea-4910-a9c7-9db55c769bee,0
+```
+
+Second event: `n5→n3` at t≈285 (term 12,
+`followerNextIndex = 2349 but logStartIndex = 2377`) — the two events
+sit exactly at the run's two purge.gap milestones, as the mechanism
+triage predicts. `:install-snapshot-evidence {:valid? true, :total 4,
+…}` in both results files.
 
 ### Criterion 3 — evidence-assertion negative proof
 
@@ -170,11 +202,48 @@ Two independent proofs:
 
 ### Criterion 4 — transfer, follower-reads-under-partition, mixed-all, churn seeded-red
 
-<!-- OTHER RUNS -->
+| Run | Exit | Wall | Analysis | ok / fail / info | Store (`20260805T…`) |
+|---|---|---|---|---|---|
+| transfer | 0 | 323 s | 0.5 s | 1088 / 408 / 4 | `…transfer/174240.178Z` |
+| partition + `--reads mixed` | 0 | 317 s | 0.5 s | 1008 / 491 / 1 | `…partition/174801.489Z` |
+| mixed-all | 0 | 321 s | 0.6 s | 1117 / 383 / 0 | `…mixed-all/175840.480Z` |
+| churn + `--seed-bug stale-reads` | **1** | 320 s | 1.0 s | 1492 / 527 / 97 | `…snapshot-churn-seedbug-stale-reads/175317.732Z` |
+
+- **transfer**: ~13 transfers, every handover either succeeded or was
+  recorded (`{:target …, :result …}` in the history); all checkers
+  valid.
+- **follower reads under partition**: 234 of the run's reads went
+  follower-targeted (`:read-via` spread n1:52 n2:36 n3:61 n4:60 n5:25),
+  through partition cycles, and the per-key linearizability analyses
+  passed — the follower-read path claims full linearizability and was
+  judged so.
+- **mixed-all**: drew 1 churn / 1 crash / 4 pause / 3 partition /
+  1 transfer segments; liveness valid; evidence reported (0, not
+  required — see Deviations 4).
+- **churn seeded-red**: convicts **all five keys** while the churn
+  cycles run — 2 install-snapshot events landed during the seeded run
+  itself. (Its 97 `:info`s are LSDE completions: this run executed
+  before the new outcome row landed; conviction is unaffected — the
+  seeded stale reads are `:ok`s.) Key 0's violating pair, verbatim:
+
+  ```
+  {:op {:process 0, :type :ok, :f :write, :value 0, :index 207, :time 15945464666}}
+  {:op {:process 0, :type :ok, :f :read,  :value 3, :index 213, :time 16092558206},
+   :model #knossos.model.Inconsistent{:msg "can't read 3 from register 0"}}
+  ```
 
 ### Criterion 5 — analysis time and `:info` sanity
 
-<!-- SANITY -->
+Analysis stayed sub-second on every green run (0.5–0.8 s; the seeded
+red at 1.0 s) — the `--rate 1.4` slowdown plus the LSDE row keeps
+`:info` counts at 0–5 despite the 800-op keys, so the knossos cliff
+stays distant (contrast the preserved first churn-#2 attempt: 147
+unclassified LSDE `:info`s → out-of-memory at 924 s wall). `:info`
+sanity per the established method: churn #1's 5 `:info` completions all
+inside `:churn-kill`→`:churn-restart` windows, zero in calm phases;
+churn #2, mixed-all: zero `:info` anywhere; transfer: 4 (harness
+timeouts riding leadership handovers); reads carry zero `:info` in
+every run.
 
 ### Criterion 6 — headers, ownership, workflow diff
 

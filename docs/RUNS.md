@@ -164,3 +164,64 @@ green runs vs 60 in the four pre-revision runs), every remaining `:info`
 sits inside a fault window (crash #2: 17/17 inside; mixed #1: 14/14
 inside), and knossos analysis stayed sub-second everywhere — no
 regression toward the review's 4-core 20-minute outlier.
+
+## 2026-08-05 — M2 part 1 gates: snapshot churn, transfer, follower reads (Job 07)
+
+- **Commands**: `env/run.sh test --nemesis <kind> --time-limit 300` (+
+  churn runs: `--rate 1.4 --ops-per-key 800` — the sustained write
+  stream that crosses the server's purge.gap=1024 milestones; defaults
+  unchanged)
+- **Versions**: ratis 3.2.2, jepsen 0.3.13, SUT `ratis-kv 0.1.0-SNAPSHOT`, JDK 21
+
+| Run | Exit | Wall | Analysis | ok / fail / info | Store (`20260805T…`) |
+|---|---|---|---|---|---|
+| snapshot-churn #1 | 0 | 318 s | 0.8 s | 1531 / 550 / 5 | `…snapshot-churn/172157.232Z` |
+| snapshot-churn #2 | 0 | 320 s | 0.8 s | 1479 / 616 / 0 | `…snapshot-churn/180734.533Z` |
+| transfer | 0 | 323 s | 0.5 s | 1088 / 408 / 4 | `…transfer/174240.178Z` |
+| partition + `--reads mixed` | 0 | 317 s | 0.5 s | 1008 / 491 / 1 | `…partition/174801.489Z` |
+| mixed-all | 0 | 321 s | 0.6 s | 1117 / 383 / 0 | `…mixed-all/175840.480Z` |
+| snapshot-churn + seed-bug | **1** | 320 s | 1.0 s | 1492 / 527 / 97 | `…snapshot-churn-seedbug-stale-reads/175317.732Z` |
+
+**Install-snapshot evidence** (the churn runs' reason to exist — counts
+from the evidence checker, events = distinct leader-send/receive pairs):
+run #1 total 4 = 2 events (`n4→n3` t≈140 s at term 6, `n5→n3` t≈285 s at
+term 12); run #2 total 4 = 2 events (`n1→n3`, `n1→n5`). The first
+event's pair, verbatim (run #1):
+
+```
+2026-08-05 17:24:17.537 [...] INFO ...GrpcLogAppender - n4@group-…->n3-GrpcLogAppender:
+  followerNextIndex = 1133 but logStartIndex = 1151, send snapshot
+  SingleFileSnapshotInfo(t:6, i:1192):[…/sm/snapshot.6_1192] to follower
+2026-08-05 17:24:17.584 [...] INFO ...SnapshotInstallationHandler - n3@group-…:
+  receive installSnapshot: n4->n3#0-t6,chunk:3e1b2d99-44ea-4910-a9c7-9db55c769bee,0
+```
+
+Outcome-mapping sanity (churn #1): all 5 `:info` completions inside
+`:churn-kill`→`:churn-restart` windows; churn #2 has zero `:info` at
+all. The `mixed-all` run drew 1 churn / 1 crash / 4 pause / 3 partition
+/ 1 transfer segments (evidence not required there — its churn share
+sits below the purge gap by design; counts still reported). The
+follower-reads run sent 234 linearizable reads follower-targeted
+(`:read-via` spread n1:52 n2:36 n3:61 n4:60 n5:25) under the partition
+cycle and stayed linearizable. The seeded-red run convicts **all five
+keys** amid full churn — 2 install events landed during the seeded run
+itself — key 0's pair: wrote 0 (index 207), read stale 3 (index 213),
+`can't read 3 from register 0`.
+
+**Two first-attempt artifacts, preserved deliberately:**
+
+1. `…snapshot-churn/165902.318Z` — the brief's original cycle (no
+   in-cycle transfer): three churn cycles, snapshot replies
+   `:success? true`, **zero installs** — the evidence checker failed the
+   run (exit 1, `:error :no-install-snapshot-evidence`). This is the
+   checker's negative proof on a real cluster, and the demonstration
+   that kill+snapshot+restart alone cannot reach install-snapshot at
+   default segment/purge settings (see the Job 07 report's mechanism
+   triage).
+2. `…snapshot-churn/172714.309Z` — churn #2's first attempt: exit 2,
+   `:valid? :unknown`, 924 s wall — 147 `LeaderSteppingDownException`
+   completions (no outcome row before this job; pessimistic `:info`)
+   pushed knossos out of memory on key 0. Triaged to the pre-append
+   admission check at 3.2.2; the new `:leader-stepping-down` definite
+   `:fail` row eliminates the class (run #2's re-run: 0 `:info`,
+   0.8 s analysis).
