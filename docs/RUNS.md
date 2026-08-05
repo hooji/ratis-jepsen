@@ -225,3 +225,95 @@ itself — key 0's pair: wrote 0 (index 207), read stale 3 (index 213),
    admission check at 3.2.2; the new `:leader-stepping-down` definite
    `:fail` row eliminates the class (run #2's re-run: 0 `:info`,
    0.8 s analysis).
+
+## 2026-08-05 — M2 part 2 gates: membership churn (Job 08)
+
+- **Commands**: `env/run.sh test --nemesis <kind> --time-limit 300`
+  (probe: `--time-limit 180`; the combined kind carries its own
+  workload defaults, rate 1.4 / 800 ops-per-key — no extra flags)
+- **Versions**: ratis 3.2.2, jepsen 0.3.13, SUT `ratis-kv
+  0.1.0-SNAPSHOT` **with the Job 08 state-machine lifecycle fix**
+  (below), JDK 21. Membership-bearing kinds run all 7 nodes.
+
+| Run | Exit | Wall | Analysis | ok / fail / info | Conf transitions | Store (`20260805T…`) |
+|---|---|---|---|---|---|---|
+| membership #1 | 0 | 316 s | 2.5 s | 1081 / 419 / 0 | 21 | `…membership/221237.705Z` |
+| membership #2 | 0 | 334 s | 1.6 s | 1106 / 394 / 0 | 21 | `…membership/221817.914Z` |
+| membership-snapshot-churn | 0 | 321 s | 1.9 s | 1480 / 598 / 6 | 8 | `…membership-snapshot-churn/222358.282Z` |
+| mixed-all | 0 | 313 s | 1.7 s | 1117 / 383 / 0 | 3 | `…mixed-all/222925.746Z` |
+| listener-probe | 0 | 74 s | 1.5 s | 1099 / 401 / 0 | 4 | `…listener-probe/223445.323Z` |
+| membership + seed-bug | **1** | 313 s | 2.2 s | 1131 / 369 / 0 | 20 | `…membership-seedbug-stale-reads/223604.824Z` |
+
+**Membership evidence** (the law, extended to conf changes): both
+dedicated runs committed 21 distinct transitional conf entries each —
+per-move mix #1: 5 add / 6 remove / 3 replace committed (2 replaces'
+client replies exhausted; the heal half's census-retry reconciled) —
+and six distinct nodes cycled through joins in each
+(`:joined [n5 n6 n4 n7 n3 n2]`). The first transitional line, verbatim
+(membership #1 — the remove of n5 committing at index 774; only
+`old=peers:` lines count as evidence — every new leader re-appends a
+*stable* conf at its startup index, so elections never masquerade as
+conf changes):
+
+```
+2026-08-05 22:13:06.462 [grpc-default-executor-9] INFO org.apache.ratis.server.RaftServer$Division -
+  n1@group-ABBC16E54704: set configuration conf: {index: 774, cur=peers:[n1|n1:6000, n2|n2:6000,
+  n3|n3:6000, n4|n4:6000]|listeners:[], old=peers:[n1|n1:6000, n2|n2:6000, n3|n3:6000, n4|n4:6000,
+  n5|n5:6000]|listeners:[]}
+```
+
+**Joiner-install evidence** (combined run): 4 nodes joined; the one
+pre-first-snapshot join (n6) correctly needed no install; **all three
+post-snapshot joiners installed during staging**
+(`:joined-with-installs ["n2" "n4" "n5"]`), 5 clean installs total,
+0 staging failures. n5's pair, verbatim — a fresh joiner (log from 0)
+behind a purged leader log, install as the only way in:
+
+```
+2026-08-05 22:28:35.634 [...] INFO ...GrpcLogAppender - n4@group-…->n5-GrpcLogAppender:
+  followerNextIndex = 0 but logStartIndex = 2219, send snapshot ... to follower
+2026-08-05 22:28:35.672 [...] INFO ...SnapshotInstallationHandler - n5@group-…:
+  receive installSnapshot: n4->n5#0-t9,chunk:e69da59a-…
+```
+
+The seeded-red run convicts **all five keys** (`:failures [0 1 2 3 4]`)
+while 20 conf transitions and 5 joins churn around it; its membership
+evidence stays green — linearizability is what convicts. `:info`
+sanity: zero `:info` in every run except the combined (6, all inside
+churn/replace fault windows).
+
+**Conviction, preserved (the reason the SUT fix exists):**
+`…membership-snapshot-churn/214003.673Z` — the first combined gate,
+run on the pre-fix SUT, exit 1 with `:error
+:no-joiner-install-evidence`: three nodes joined, none could keep an
+installed snapshot — at ratis-3.2.2 `BaseStateMachine.pause()` is
+empty, `StateMachineUpdater.reload()` asserts the PAUSED lifecycle
+state, and the assert failure closes the whole division. Both install
+receivers in that store crashed identically
+(`IllegalStateException at StateMachineUpdater.reload:230`, division
+`shutdown` ~25 ms after `successfully install the entire snapshot`),
+the staged joiner's `setConfiguration` wedged ~60 s in NOPROGRESS
+staging while rejecting all other conf changes and transfers. Triage,
+fix and upstream-report framing in `jobs/08-membership-churn/08_report.md`.
+Also preserved from the same pre-fix pass: `…membership/211831.264Z`
+(the zero-add uniform-draw shakedown that motivated block draws — green,
+10 transitions), `…membership/212908.588Z`, `…membership/213435.123Z`
+(pre-fix membership gates, 20/21 transitions, green).
+
+**Listener-staging probe** (bounded; RATIS-1825 territory) — ran
+twice, identical outcome, both preserved
+(`…listener-probe/215054.707Z`, `…223445.323Z`): every conf mechanic
+**passes** — stage n7 as LISTENER, replication to it confirmed from
+its own log (conf index 845 adopted), **promote listener→voter
+commits**, demote commits, remove commits, pool restored. The wedge:
+n7's division never leaves lifecycle STARTING — a linearizable read
+targeted at it fails `ServerNotReadyException: … is not in [RUNNING]:
+current state is STARTING` both as listener AND ~15 s after promotion
+to voter, while it replicates the whole time. Mechanism pinned at
+3.2.2: `checkStaging` marks staged peers caught-up through a
+FOLLOWER-role-only `containsInConf`, so a staged listener is never
+marked; the leader's appends to it stay `initializing=true`, and
+`RaftServerImpl` (line 1611) only transitions STARTING→RUNNING on a
+non-initializing append. Client-facing availability of a staged
+listener is therefore zero until a process restart. Details and
+upstream framing in the Job 08 report.
