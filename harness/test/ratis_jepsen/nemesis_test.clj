@@ -23,15 +23,22 @@
             [ratis-jepsen.nemesis :as nemesis]))
 
 (deftest cli-kinds-surface
-  (is (= #{"none" "partition" "crash" "pause" "mixed"} nemesis/kinds)))
+  (is (= #{"none" "partition" "crash" "pause" "mixed"
+           "snapshot-churn" "transfer" "mixed-all"}
+         nemesis/kinds)))
 
 (deftest fault-heal-vocabulary
   (testing "every fault has exactly one heal; no f plays both roles"
-    (is (= #{:start :crash :pause} nemesis/fault-fs))
-    (is (= #{:stop :restart :resume} nemesis/heal-fs))
+    (is (= #{:start :crash :pause :churn-kill} nemesis/fault-fs))
+    (is (= #{:stop :restart :resume :churn-restart} nemesis/heal-fs))
     (is (empty? (set/intersection nemesis/fault-fs nemesis/heal-fs)))
     (is (= (count nemesis/fault-fs)
-           (count (set (vals nemesis/fault->heal)))))))
+           (count (set (vals nemesis/fault->heal))))))
+  (testing "action fs act without gating: disjoint from faults and heals"
+    (is (= #{:churn-snapshot :transfer} nemesis/action-fs))
+    (is (empty? (set/intersection nemesis/action-fs
+                                  (set/union nemesis/fault-fs
+                                             nemesis/heal-fs))))))
 
 (deftest max-minority-sizing
   (testing "survivors always keep a majority"
@@ -116,6 +123,38 @@
               {:type :info, :f :restart}]
              (nemesis/crash-segment cs))))))
 
+(def churn-segment-shape
+  [{:type :sleep, :value 15}
+   {:type :info, :f :churn-kill}
+   {:type :sleep, :value 5}
+   {:type :info, :f :churn-snapshot}
+   {:type :sleep, :value 5}
+   {:type :info, :f :churn-restart}])
+
+(def transfer-segment-shape
+  [{:type :sleep, :value 20}
+   {:type :info, :f :transfer}])
+
+(deftest m2-segment-shapes
+  (testing "churn: calm, kill, writes window, snapshot, gap, restart"
+    (is (= churn-segment-shape (nemesis/churn-segment default-cycles))))
+  (testing "transfer: calm, one transfer attempt"
+    (is (= transfer-segment-shape (nemesis/transfer-segment default-cycles))))
+  (testing "churn cadence is configurable"
+    (is (= [{:type :sleep, :value 30}
+            {:type :info, :f :churn-kill}
+            {:type :sleep, :value 8}
+            {:type :info, :f :churn-snapshot}
+            {:type :sleep, :value 2}
+            {:type :info, :f :churn-restart}]
+           (nemesis/churn-segment
+             (nemesis/cycles {:churn-calm-s 30
+                              :churn-kill-to-snapshot-s 8
+                              :churn-snapshot-to-restart-s 2}))))
+    (is (= {:type :sleep, :value 45}
+           (first (nemesis/transfer-segment
+                    (nemesis/cycles {:transfer-calm-s 45})))))))
+
 (deftest mixed-generator-interleaves-whole-segments
   (let [segments (->> (nemesis/mixed-generator default-cycles)
                       (take 400)
@@ -123,11 +162,42 @@
                       (map vec))
         known    #{partition-segment-shape crash-segment-shape
                    pause-segment-shape}]
-    (testing "every 4-element group is exactly one of the three segments
-              (segments are atomic — no interleaving inside a cycle)"
+    (testing "every 4-element group is exactly one of the three M1
+              segments — mixed is unchanged by M2 (segments are atomic;
+              no interleaving inside a cycle)"
       (is (every? known segments)))
     (testing "all three kinds appear (100 draws; P[miss] ~ (2/3)^100)"
       (is (= known (set segments))))))
+
+(deftest mixed-all-interleaves-all-five-kinds
+  (let [known    [churn-segment-shape       ; matching full shapes is
+                  partition-segment-shape   ; unambiguous: every pair
+                  crash-segment-shape       ; differs at its fault op
+                  pause-segment-shape       ; (element 2) at the latest
+                  transfer-segment-shape]
+        ;; 240 elements always ends mid-segment; trim to whole segments
+        ;; by consuming until the tail is shorter than the longest shape.
+        elements (take 240 (nemesis/mixed-all-generator default-cycles))
+        segments (loop [es elements, out []]
+                   (let [m (some (fn [s]
+                                   (when (= s (take (count s) es)) s))
+                                 known)]
+                     (if (and m (>= (count es) (count m)))
+                       (recur (drop (count m) es) (conj out m))
+                       out)))]
+    (testing "the stream is whole segments drawn from all five kinds
+              (~80+ draws; P[missing a kind] < 1e-5)"
+      (is (<= 30 (count segments)))
+      (is (= (set known) (set segments))))))
+
+(deftest package-m2-kinds
+  (testing "snapshot-churn and transfer cycle their segments"
+    (is (= churn-segment-shape
+           (take 6 (:generator (nemesis/package "snapshot-churn")))))
+    (is (= transfer-segment-shape
+           (take 2 (:generator (nemesis/package "transfer"))))))
+  (testing "mixed-all: an infinite stream"
+    (is (= 60 (count (take 60 (:generator (nemesis/package "mixed-all"))))))))
 
 (deftest package-kinds
   (testing "none: noop nemesis, idle generator"

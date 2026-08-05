@@ -37,8 +37,13 @@
     budget exhausting minutes before --time-limit), which must not flag.
 
   Composed into the register workload's checker stack as :liveness; runs
-  with --nemesis none get one calm region spanning the whole history."
-  (:require [jepsen.checker :as checker]
+  with --nemesis none get one calm region spanning the whole history.
+
+  Also here (Job 07): the install-snapshot evidence checker — see its
+  section below."
+  (:require [clojure.string :as str]
+            [jepsen.checker :as checker]
+            [jepsen.store :as store]
             [ratis-jepsen.nemesis :as nemesis]))
 
 (def default-opts
@@ -235,3 +240,104 @@
      (reify checker/Checker
        (check [_this _test history _copts]
          (check-liveness history opts))))))
+
+;; ---------------------------------------------------------------------------
+;; Install-snapshot evidence (Job 07): a snapshot-churn run that never
+;; exercised install-snapshot is a broken test, not a green one (the
+;; Review 01 lesson). Judged from the nodes' collected logs — the copies
+;; jepsen snarfs into store/ before db teardown, because teardown wipes
+;; the on-node logs before analysis runs.
+;; ---------------------------------------------------------------------------
+
+(def install-snapshot-patterns
+  "The ratis-3.2.2 log lines that prove install-snapshot happened, pinned
+  by observation on live snapshot-churn runs (Job 07; see the report for
+  full example lines):
+
+  :send — the leader's appender switching a follower to snapshot
+  installation (GrpcLogAppender):
+    \"n5@group-…->n2-GrpcLogAppender: followerNextIndex = 231 < minIndex = 361, notify follower to install snapshot\"
+
+  :receive — the restarted follower applying the installation request
+  (RaftServer$Division):
+    \"n2: receive installSnapshot: n5->n2#0-t6,notify:(t:6, i:360)\"
+
+  Both are re-find'd per log line; either side alone already proves the
+  path ran, both are counted for the report."
+  {:send    #"notify follower to install snapshot"
+   :receive #"receive installSnapshot"})
+
+(defn count-install-evidence
+  "Pure: {node log-content} in, {:total n, :counts {node {:send s
+  :receive r}}} out — occurrences counted per line so multi-event logs
+  count each event."
+  [node->content patterns]
+  (let [counts (into {}
+                     (map (fn [[node content]]
+                            (let [lines (str/split-lines (or content ""))]
+                              [node
+                               (into {}
+                                     (map (fn [[k pat]]
+                                            [k (count
+                                                 (filter #(re-find pat %)
+                                                         lines))]))
+                                     patterns)])))
+                     node->content)]
+    {:total  (reduce + 0 (mapcat vals (vals counts)))
+     :counts counts}))
+
+(defn evidence-verdict
+  "Pure: the evidence decision. `required?` is whether the history
+  actually contains snapshot-churn nemesis ops — a mixed-all run that
+  happened to draw no churn segments owes no evidence, while a
+  snapshot-churn run always does."
+  [required? {:keys [total counts]}]
+  (cond
+    (not required?)
+    {:valid? true
+     :note "no snapshot-churn ops in history — evidence not required"
+     :total total
+     :counts counts}
+
+    (pos? total)
+    {:valid? true, :total total, :counts counts}
+
+    :else
+    {:valid? false
+     :error  :no-install-snapshot-evidence
+     :note   (str "snapshot-churn ran but no install-snapshot log line "
+                  "matched on any node — the run never exercised the "
+                  "path it exists to test")
+     :total  0
+     :counts counts}))
+
+(defn churn-ops?
+  "Does this history contain snapshot-churn nemesis activity?"
+  [history]
+  (boolean (some #(and (not (client-op? %)) (= :churn-kill (:f %)))
+                 history)))
+
+(defn- node-log-content
+  "The snarfed store copy of a node's SUT log, or nil when absent (e.g.
+  a node that died before producing one)."
+  [test node]
+  (let [f (store/path test (name node) "ratis-kv.log")]
+    (when (.exists ^java.io.File f)
+      (slurp f))))
+
+(defn install-snapshot-evidence
+  "The evidence checker. Composed unconditionally: the history decides
+  whether evidence is owed (churn-ops?), so fault schedules without
+  churn pass with a note instead of a lie."
+  ([] (install-snapshot-evidence {}))
+  ([opts]
+   (let [patterns (merge install-snapshot-patterns (:patterns opts))]
+     (reify checker/Checker
+       (check [_this test history _copts]
+         (evidence-verdict
+           (churn-ops? history)
+           (count-install-evidence
+             (into {}
+                   (map (fn [node] [node (node-log-content test node)]))
+                   (:nodes test))
+             patterns)))))))

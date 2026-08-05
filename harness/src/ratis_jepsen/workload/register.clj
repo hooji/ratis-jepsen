@@ -96,6 +96,11 @@
                                                 :algorithm :linear})
                                              :timeline (timeline/html)}))
                            :liveness   (rj-checker/liveness)
+                           ;; Owed only when the history actually carries
+                           ;; snapshot-churn ops; other schedules pass
+                           ;; with a note (the checker gates itself).
+                           :install-snapshot-evidence
+                           (rj-checker/install-snapshot-evidence)
                            :stats      (checker/stats)
                            :exceptions (checker/unhandled-exceptions)}
                     gnuplot? (assoc :perf (checker/perf))))}))

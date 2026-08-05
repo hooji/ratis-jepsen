@@ -228,3 +228,39 @@
          (checker/calm-regions [[10 40] [100 200]] 0 200)))
   (testing "no faults: one calm region spanning the run"
     (is (= [[0 200]] (checker/calm-regions [] 0 200)))))
+
+;; ---------------------------------------------------------------------------
+;; Install-snapshot evidence (Job 07) — the pure decision parts. The
+;; log-line fixtures live in install-snapshot-evidence-counting below,
+;; using lines observed verbatim on live snapshot-churn runs.
+;; ---------------------------------------------------------------------------
+
+(deftest churn-ops-detection
+  (testing "a history with churn nemesis ops owes evidence"
+    (is (checker/churn-ops? (history [(nem 10 :churn-kill)
+                                      (nem 10.5 :churn-kill)]))))
+  (testing "client ops and other nemeses do not"
+    (is (not (checker/churn-ops?
+               (history (ok-traffic 0 5)
+                        [(nem 10 :crash) (nem 10.5 :crash)
+                         (nem 20 :restart) (nem 21 :restart)
+                         (nem 30 :transfer) (nem 30.5 :transfer)]))))))
+
+(deftest evidence-verdict-decision
+  (let [none {:total 0 :counts {"n1" {:send 0 :receive 0}}}
+        some {:total 3 :counts {"n1" {:send 2 :receive 0}
+                                "n2" {:send 0 :receive 1}}}]
+    (testing "churn ran and evidence exists: valid, counts reported"
+      (let [v (checker/evidence-verdict true some)]
+        (is (true? (:valid? v)))
+        (is (= 3 (:total v)))))
+    (testing "churn ran and NO install-snapshot evidence: the distinct
+              failure — a churn run that tested nothing is broken"
+      (let [v (checker/evidence-verdict true none)]
+        (is (false? (:valid? v)))
+        (is (= :no-install-snapshot-evidence (:error v)))))
+    (testing "no churn in the history: no evidence owed (a mixed-all run
+              may legitimately draw zero churn segments)"
+      (let [v (checker/evidence-verdict false none)]
+        (is (true? (:valid? v)))
+        (is (some? (:note v)))))))
