@@ -13,9 +13,12 @@ touch that path; today's valid scenarios are `none` and `partition`
 ## Deliverables
 
 1. **`.github/workflows/jepsen.yml`**:
-   - Triggers: `workflow_dispatch` with inputs `scenarios`
+   - Triggers: **`workflow_dispatch` only** — inputs `scenarios`
      (comma-list, default `none,partition`), `time-limit` (default
-     300); plus nightly cron running the defaults.
+     300). **No cron/scheduled trigger** (owner decision 2026-08-04):
+     cadence stays manual until the planned donation offer to the
+     Apache Ratis project, whose maintainers would set their own
+     schedule.
    - Job `build-sut`: `sut/ratis-kv/mvnw -f sut/ratis-kv/pom.xml -q
      package`, upload the tarball as an artifact.
    - Job `test` — **matrix: one runner per scenario** (parse the
@@ -75,5 +78,5 @@ parallel), not `sut/**`, not `docs/**`.
 
 New nemeses or checkers (Job 05), scenario defaults beyond
 `none,partition` (coordinator updates the default list after Job 05
-merges), lazyfs/FUSE spike (separate, gates M4), branch protection or
-repo settings, performance.
+merges), **any scheduled/cron trigger**, lazyfs/FUSE spike (separate,
+gates M4), branch protection or repo settings, performance.
