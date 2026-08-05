@@ -111,6 +111,27 @@
     (is (re-find env/startup-line-pattern
                  (str "some earlier line\n" realistic-line "\nlater line")))))
 
+;; ---------------------------------------------------------------------------
+;; Leader-census line classification (the crash nemesis's targeting bias)
+;; ---------------------------------------------------------------------------
+
+(deftest leader-transition-line-classification
+  (let [prefix (str "2026-08-05 04:10:00.123 [nioEventLoopGroup-3-1] INFO "
+                    "org.apache.ratis.server.impl.RaftServerImpl - ")]
+    (testing "a transition to LEADER counts"
+      (is (db/leader-transition?
+            (str prefix "n1@group-ABBC16E54704: changes role from CANDIDATE "
+                 "to LEADER at term 2 for changeToLeader"))))
+    (testing "leadership history does not count — only the destination role"
+      (is (not (db/leader-transition?
+                 (str prefix "n1@group-ABBC16E54704: changes role from LEADER "
+                      "to FOLLOWER at term 3 for stepDown"))))
+      (is (not (db/leader-transition?
+                 (str prefix "n2@group-ABBC16E54704: changes role from FOLLOWER "
+                      "to CANDIDATE at term 4 for changeToCandidate")))))
+    (testing "nil (no transition line in the log) is not a leader"
+      (is (not (db/leader-transition? nil))))))
+
 (deftest startup-regex-rejects-near-misses
   (let [prefix "2026-08-04 13:59:00.123 [main] INFO ratis.jepsen.kv.Main - "]
     (doseq [[why line]
