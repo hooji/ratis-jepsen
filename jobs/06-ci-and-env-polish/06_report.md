@@ -12,12 +12,16 @@ scenario parsed from a comma-list input, always uploads compressed
 bugs. All four BACKLOG-item-7 env polish items landed (multi-cert
 `EXTRA_CA_B64` split, CA-bundle size pre-flight, `trap`-based failure
 summary in `validate.sh`, `maven-repo` lifecycle note), and the root
-README stub was replaced with a real front page. The two decisions to
+README stub was replaced with a real front page. The three decisions to
 look hardest at: the scenario matrix is computed from the input by a
 parse step inside `build-sut` (so the valid-scenario set lives only in
-the harness, ready for Job 05's additions), and the red-gate asserts
-*both* non-zero harness exit *and* a `:valid? false` results.edn (a mere
-infrastructure failure cannot masquerade as a catch).
+the harness, ready for Job 05's additions); the red-gate asserts *both*
+non-zero harness exit *and* a `:valid? false` results.edn (a mere
+infrastructure failure cannot masquerade as a catch); and the first
+real dispatch exposed — and this job fixed — a latent env portability
+bug: sshd's `StrictModes` rejected the runner-uid-owned
+`authorized_keys` mount, so the image now sets `StrictModes no`
+(Deviations has the full story).
 
 ## What was built
 
@@ -25,11 +29,14 @@ infrastructure failure cannot masquerade as a catch).
   (`build-sut` → matrix `test` per scenario + `red-gate`; concurrency
   group per ref, `fail-fast: false`, `timeout-minutes` 60/30, store
   artifacts always uploaded, 7-day retention).
-- `env/Dockerfile` — the `EXTRA_CA_B64` block now splits the decoded PEM
-  bundle one-cert-per-file before `update-ca-certificates`, because
-  Debian's `ca-certificates-java` hook imports only the *first* cert of
-  each file into the JVM keystore (Review 02 finding 2); fails the build
-  loudly on a certificate-free bundle.
+- `env/Dockerfile` — two changes. (1) The `EXTRA_CA_B64` block now
+  splits the decoded PEM bundle one-cert-per-file before
+  `update-ca-certificates`, because Debian's `ca-certificates-java`
+  hook imports only the *first* cert of each file into the JVM keystore
+  (Review 02 finding 2); fails the build loudly on a certificate-free
+  bundle. (2) `StrictModes no` in the sshd drop-in — found by the first
+  real CI dispatch, where the bind-mounted `authorized_keys` is owned
+  by the runner's uid 1001 and sshd refused it (see Deviations).
 - `env/run.sh` — `preflight_ca_bundle()` validates `RJ_EXTRA_CA_BUNDLE`
   (readable, contains a PEM cert, ≤ 64 KiB) with instructive errors
   before the content becomes a docker build-arg (finding 3); stale
@@ -78,11 +85,41 @@ Dispatched via the GitHub MCP tooling on ref `claude/ci-env-polish-wbdv67`
 with `scenarios=none,partition`, `time-limit=300` (a one-time
 registration bootstrap was needed first — see Deviations):
 
-- Run: <https://github.com/hooji/ratis-jepsen/actions/runs/30976079997>
-  (run #2, event `workflow_dispatch`, head `3c82fb1` — the final,
-  dispatch-only workflow)
-- RUN-VERDICT-PLACEHOLDER (run in flight as of this commit; verdict and
-  per-job evidence land in the follow-up commit)
+- **Green run (the acceptance run):**
+  <https://github.com/hooji/ratis-jepsen/actions/runs/30976650548>
+  (run #3, event `workflow_dispatch`, head `9bab897`, dispatch-only
+  workflow). All four jobs green:
+  - `build-sut` 41 s (SUT build step 29 s; scenarios parsed to
+    `["none","partition"]`, time limit 300 s)
+  - `test (none)` 1 m 17 s — `up` 23 s, harness 48 s, exit 0. The short
+    harness time is correct behavior: with no nemesis generator cycling,
+    the 5×300-op budget exhausts in under a minute and the run ends;
+    `--time-limit` is a ceiling, not a floor.
+  - `test (partition)` 5 m 58 s — `up` 26 s, harness 5 m 21 s (full
+    300 s workload + knossos), exit 0.
+  - `red-gate` 2 m 54 s — seeded step 2 m 17 s; log excerpt:
+
+    ```
+    Analysis invalid! (ﾉಥ益ಥ）ﾉ ┻━┻
+    red-gate: harness exit code 1
+    red-gate: ':valid? false' evidence found in:
+    store/ratis-kv-register-partition-seedbug-stale-reads/.../results.edn   (top-level + all 5 per-key files)
+    ```
+
+    The seeded analysis shows `:failures [0 1 2 3 4]` — convicted on
+    all five keys; 1500 ops (1071 ok / 429 fail / 0 info), mirroring
+    the local reference runs.
+  - Artifacts (7-day retention): `sut-tarball` (19.6 MB), `store-none`
+    (201 KB), `store-partition` (284 KB), `store-red-gate` (253 KB).
+- **The first dispatch (run #2,
+  <https://github.com/hooji/ratis-jepsen/actions/runs/30976079997>)
+  failed and earned its keep**: all three topology jobs timed out
+  waiting for node ssh. Root cause (reproduced locally, then fixed —
+  see Deviations): GitHub runners' checkout is uid 1001, and sshd's
+  `StrictModes` refused the bind-mounted `authorized_keys` not owned by
+  root. Its failure shape also confirmed the always-upload path: the
+  jobs correctly reported "no store/ directory" and warned instead of
+  failing the upload step.
 
 ### Criterion 3 — each env-polish item demonstrated
 
@@ -242,6 +279,21 @@ $ git diff --stat main...HEAD
   GitHub always supplies the declared defaults, so this only matters for
   non-dispatch invocation shapes, but it makes the workflow robust to
   them.
+- **One env change beyond the four polish items: `StrictModes no` in
+  the image's sshd config.** The brief froze `run.sh test`'s interface
+  and named four polish items; it did not anticipate that `run.sh up`
+  simply cannot work on a GitHub-hosted runner as it stood. The first
+  dispatch (run #2) timed out on every node: the checkout — and thus
+  the bind-mounted `authorized_keys` — is owned by uid 1001 there, and
+  sshd's default `StrictModes` refuses a key file not owned by the
+  login user. Reproduced locally byte-for-byte (`chown -R 1001:1001
+  env/.state/ssh` → `Authentication refused: bad ownership or modes for
+  file /root/.ssh/authorized_keys` in the node's sshd log), fixed with
+  `StrictModes no` in the existing sshd drop-in (the ownership check
+  defends multi-user machines; the throwaway single-purpose compose
+  network has none), and verified green under both root- and
+  1001-owned key material. Without this the CI deliverable does not
+  function; local behavior is unchanged.
 
 ## Known gaps and risks
 
@@ -270,8 +322,11 @@ $ git diff --stat main...HEAD
   from Job 02; nothing in this job is arch-pinned).
 - **CI wall-clock estimate** (~10–20 min per test leg: image build
   ≈ 4–6 min, deps ≈ 2–3 min, 300 s workload + checking) is projected
-  from local timings — RUN-TIMING-PLACEHOLDER (measured numbers land
-  with the run verdict in the follow-up commit).
+  from local timings — and the measured hosted-runner numbers came in
+  far *under* it: the whole sweep took 6 m 47 s wall (image build
+  ≈ 25–30 s per job on the runners' local mirrors, harness deps ≈ 30 s,
+  partition leg 5 m 58 s end-to-end). The 60-minute job timeout has
+  roomy headroom for Job 05's longer scenarios.
 
 ## Suggestions (out of scope)
 
