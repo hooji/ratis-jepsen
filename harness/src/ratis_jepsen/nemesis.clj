@@ -767,8 +767,10 @@
                                (get target))
                            (catch Exception e (error-token e)))
             cluster   (census-conf test @matom)
+            ;; no-retry client: the census wants the raw single-attempt
+            ;; exception, not a retry-exhaustion wrapper
             read      (try
-                        (with-open [^RaftClient c (client/open-raft-client
+                        (with-open [^RaftClient c (client/open-probe-client
                                                     (client/node-addresses
                                                       (vec (distinct (conj (:servers cluster) target)))))]
                           {:reply (client/targeted-read! c target "GET 0")})

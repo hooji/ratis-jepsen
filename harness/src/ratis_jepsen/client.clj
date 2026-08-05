@@ -313,6 +313,19 @@
         ^RaftClientReply reply (.setConfiguration (.admin client) args)]
     {:success? (.isSuccess reply)}))
 
+(defn open-probe-client
+  "A RaftClient with NO retries: one attempt, raw outcome. Probe tooling
+  only — the listener census wants the exact exception a single
+  targeted read produces, not a RaftRetryFailureException wrapper after
+  four masked attempts (the first probe run's reads exhausted retries
+  and the per-attempt cause was unrecoverable from the record)."
+  ^RaftClient [id->address]
+  (-> (RaftClient/newBuilder)
+      (.setProperties (RaftProperties.))
+      (.setRaftGroup (raft-group id->address))
+      (.setRetryPolicy (RetryPolicies/noRetry))
+      (.build)))
+
 (defn targeted-read!
   "One linearizable read routed at `node` (sendReadOnly(msg, peerId)),
   returning the raw reply string; throws on failure. Probe tooling: the

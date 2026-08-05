@@ -162,6 +162,11 @@ final class MiniCluster implements AutoCloseable {
     return optionsById.get(id);
   }
 
+  /** The running RaftServer of node {@code id}. */
+  RaftServer server(String id) {
+    return serversById.get(id);
+  }
+
   // ---- protocol helpers ----
 
   static String send(RaftClient client, String request) throws IOException {
