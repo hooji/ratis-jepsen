@@ -32,17 +32,40 @@ coordinator turns these into jobs when their milestone arrives.*
    repo-root wrapper is provided; briefs/workflows must use the module
    path (Review 01 suggestion 3 resolved this way: no fragile root
    symlink).
-7. **Upstream-report candidate (elevated): leader retries
-   InstallSnapshot with no backoff.** Job 07 observed ~400 attempts in
-   15.6 s answered by `ServerNotReadyException` during follower reboot;
-   Review 07 reproduced at ~4× that magnitude on a slower environment
-   (2026-08-05). Converges cleanly at n=5, but the hot loop is
-   RATIS-2500-adjacent behavior and burns leader CPU/network exactly
-   when a follower is weakest. Repro recipe + stores referenced in
-   `jobs/07-snapshot-churn/07_report.md` and the review. Action when we
-   engage upstream: file a RATIS issue with the repro; candidate fix is
-   bounded retry/backoff in the leader's snapshot notification path.
-8. **Env hardening (Review 02 round-1 suggestions, 2026-08-04, all
+7. **Upstream candidate #1 (strongest): `BaseStateMachine.pause()` is a
+   no-op that kills divisions on live snapshot install.** Job 08 /
+   Review 08 (2026-08-05/06), chain verified from 3.2.2 source and
+   reproduced live: empty `pause()` never reaches PAUSED →
+   `StateMachineUpdater.reload()`'s lifecycle assert throws → the
+   catch-all closes the division, ~4 ms after the install renamed
+   successfully. Any integrator leaning on the shipped base class
+   inherits this. Secondary, still real: the leader hammers the dead
+   division with **no backoff** (4,876 `ServerNotReadyException`
+   traces / 130 send-snapshot re-initiations in one reviewed run —
+   supersedes the original Job 07 framing of the "retry storm", whose
+   green runs were measuring durable installs while missing the
+   division deaths; see the RUNS correction note). Upstream action:
+   one issue for the base-class/lifecycle trap (fix: default `pause()`
+   honoring the contract, or reload tolerating it), one for install
+   retry backoff. Stores + exact frames in
+   `reviews/08-membership-churn/08_report.md`.
+8. **Upstream candidate #2: `GroupInfoReply.getConf()` dropped by the
+   wire serializer** at 3.2.2 (`toGroupInfoReplyProto` never sets the
+   field) — Job 08, verified by Review 08. Harness works around via
+   log-line conf census (transitional-entries-only counting).
+9. **Upstream candidate #3: staged LISTENER never leaves STARTING —
+   the RATIS-1825 corroboration.** Job 08's probe, reproduced by
+   Review 08, both stores preserved: conf-level listener staging,
+   promotion, demotion and removal all commit correctly, but a
+   groupAdd'd listener division stays lifecycle STARTING (serves no
+   client requests, ever) because `checkStaging`'s caught-up mark uses
+   FOLLOWER-only `containsInConf(id)`, so its AppendEntries keep
+   `initializing=true` (`RaftServerImpl:1611`). Pinned one-line
+   suspect: the filter needs `containsInConf(id, FOLLOWER, LISTENER)`.
+   This answers the evaluation's open RATIS-1825 question with a
+   mechanism and a candidate fix — prime material for the upstream
+   engagement.
+10. **Env hardening (Review 02 round-1 suggestions, 2026-08-04, all
    non-blocking):** multi-cert `EXTRA_CA_B64` split; image/bundle size
    pre-flight check; `trap`-based failure summary in `validate.sh`;
    README note on the `maven-repo` volume lifecycle. Batch into an env

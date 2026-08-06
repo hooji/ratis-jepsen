@@ -317,3 +317,18 @@ marked; the leader's appends to it stay `initializing=true`, and
 non-initializing append. Client-facing availability of a staged
 listener is therefore zero until a process restart. Details and
 upstream framing in the Job 08 report.
+
+## 2026-08-06 — Coordinator correction: reinterpretation of the Job 07 green runs
+
+Review 08 established (reproduced live, store
+`ratis-kv-register-snapshot-churn/20260806T064704.897Z` in the reviewer
+environment) that the Job 07 snapshot-churn entries above ran against a
+SUT whose `pause()` lifecycle bug (BACKLOG item 7) killed each churned
+follower's division ~4 ms after every successful live install. Those
+runs' verdicts stand — installs were durable, linearizability held, the
+evidence counted real events — but their implied "follower recovered
+via install-snapshot and kept serving" reading was wrong: recovery
+came from RECOVER restarts in later cycles, and "the retry storm" was
+the leader hammering a division its own install had killed. Fixed in
+Job 08 (`KvStateMachine` lifecycle discipline); the combined M2 gates
+below ran on the fixed SUT with joiners serving reads after install.

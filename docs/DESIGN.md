@@ -244,6 +244,7 @@ exceptions before any cluster run trusts it.
 | Storage dir | `/var/lib/ratis-kv` |
 | Log | stdout captured to `/var/log/ratis-kv.log` |
 | Startup line | after `RaftServer.start()`, stdout emits `ratis-kv server started: id=<id> address=<host:port> storage=<dir> group=<uuid> peers=<list>` — the boot-await signal for env validation and `db.clj` (confirmed present at Job 01's merge; changing it is a breaking change requiring a brief) |
+| Join mode (M2, ratified at Job 08 merge) | `bin/ratis-kv --id <id> --peers <full 7-node address book> --storage /var/lib/ratis-kv --join` starts a server that forms **no group**: on fresh storage it hosts nothing until bootstrapped (`GroupManagementApi.add`, then committed by `setConfiguration`); existing storage is recovered instead, making `--join` the restart mode for dynamically-joined nodes. The contract startup line is emitted **unchanged** (in join mode `peers=` is the launch address book, not a formed conf), preceded by `ratis-kv join mode: id=<id> formed no group; awaiting GroupManagementApi.add (existing storage is recovered instead)` |
 
 ## 3. Environment — `env/`
 
