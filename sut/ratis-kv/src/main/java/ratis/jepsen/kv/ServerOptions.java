@@ -22,19 +22,27 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Parsed launcher options (the process contract, DESIGN 1.2):
+ * Parsed launcher options (the process contract, DESIGN 1.2; {@code --join}
+ * added by Job 08 for the M2 membership pool):
  *
  * <pre>
  * --id n1 --peers n1=host1:6000,n2=host2:6000,... --storage /var/lib/ratis-kv
- *         [--seed-bug stale-reads]
+ *         [--join] [--seed-bug stale-reads]
  * </pre>
  *
  * @param id      this node's id; must appear in {@code peers}
- * @param peers   node id to {@code host:port} address, insertion-ordered
+ * @param peers   node id to {@code host:port} address, insertion-ordered.
+ *                In join mode this is an address book (self entry supplies
+ *                the bind port), not a group to form
  * @param storageDir raft storage directory
+ * @param join    join mode: start the server without forming a group; it
+ *                hosts nothing until bootstrapped via
+ *                {@code GroupManagementApi.add} (existing storage, if any,
+ *                is recovered instead)
  * @param seedBug the seeded bug to activate, or null for a correct server
  */
-public record ServerOptions(String id, Map<String, String> peers, Path storageDir, SeedBug seedBug) {
+public record ServerOptions(
+    String id, Map<String, String> peers, Path storageDir, boolean join, SeedBug seedBug) {
 
   /** Signals a CLI parsing/validation failure; the message is user-facing. */
   public static final class UsageException extends Exception {
@@ -66,6 +74,7 @@ public record ServerOptions(String id, Map<String, String> peers, Path storageDi
     String id = null;
     String peersSpec = null;
     String storageSpec = null;
+    boolean join = false;
     String seedBugSpec = null;
 
     for (int i = 0; i < args.length; i++) {
@@ -74,6 +83,7 @@ public record ServerOptions(String id, Map<String, String> peers, Path storageDi
         case "--id" -> id = flagValue(args, ++i, flag);
         case "--peers" -> peersSpec = flagValue(args, ++i, flag);
         case "--storage" -> storageSpec = flagValue(args, ++i, flag);
+        case "--join" -> join = true;
         case "--seed-bug" -> seedBugSpec = flagValue(args, ++i, flag);
         default -> throw new UsageException("unknown argument: " + flag);
       }
@@ -110,7 +120,7 @@ public record ServerOptions(String id, Map<String, String> peers, Path storageDi
       }
     }
 
-    return new ServerOptions(id, peers, storageDir, seedBug);
+    return new ServerOptions(id, peers, storageDir, join, seedBug);
   }
 
   private static String flagValue(String[] args, int index, String flag) throws UsageException {

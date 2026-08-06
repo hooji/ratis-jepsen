@@ -44,6 +44,11 @@
   |   (the form NotLeader/LeaderNotReady take on retry exhaustion —
   |    see below)                              |                 |       |
   | RaftRetryFailureException, non-null cause  | :info           | :fail |
+  | ServerNotReadyException                    | :info           | :fail |
+  |   (division STARTING at boot or CLOSED after a membership removal —
+  |    routine in bulk during crash restarts and membership churn; the
+  |    REQUEST was rejected, but an earlier same-callId attempt may have
+  |    applied, so writes stay ambiguous)              |         |       |
   | ResourceUnavailableException               | :fail           | :fail |
   | LeaderSteppingDownException                | :fail (pre-append admission
   |   reject during transfer; single throw site — see row comment) | :fail + loud (cannot happen) |
@@ -105,6 +110,7 @@
              ReadException
              ReadIndexException
              ResourceUnavailableException
+             ServerNotReadyException
              StateMachineException
              TimeoutIOException)))
 
@@ -230,6 +236,16 @@
       NotLeaderException          (ambiguous op-kind :not-leader)
       LeaderNotReadyException     (ambiguous op-kind :leader-not-ready)
 
+      ;; The addressed division is not RUNNING: STARTING during a boot,
+      ;; or CLOSED — a membership removal's self-shutdown (Job 08; the
+      ;; leader answers a removed peer's vote request with
+      ;; shouldShutdown and the division closes itself at 3.2.2).
+      ;; Routine in bulk during crash restarts and membership churn.
+      ;; THIS request was rejected, but the invocation may be a retry
+      ;; whose earlier attempt applied — same ambiguity discipline as
+      ;; the leadership rows: :info for writes, :fail for reads.
+      ServerNotReadyException     (ambiguous op-kind :server-not-ready)
+
       ;; Definite not-appended: admission control rejects pre-append.
       ResourceUnavailableException (definite-fail :resource-unavailable)
 
@@ -251,9 +267,13 @@
       ;; run loudly (DESIGN 2.4).
       GroupMismatchException
       (definite-fail :group-mismatch
-                     (str "outcome map: GroupMismatchException — the harness "
-                          "and SUT disagree about the raft group; this is a "
-                          "test-setup bug, flag the run: " (.getMessage t)))
+                     (str "outcome map: GroupMismatchException — the "
+                          "addressed server hosts no such group. In a "
+                          "membership run this can be a worker racing a "
+                          "node's return to the pool (benign; the client's "
+                          "next NotLeaderException refreshes its peers); "
+                          "anywhere else it is a test-setup bug — flag the "
+                          "run: " (.getMessage t)))
       StateMachineException
       (definite-fail :state-machine
                      (str "outcome map: StateMachineException — our state "

@@ -305,3 +305,127 @@
       (is (zero? (:total ev)))
       (is (= :no-install-snapshot-evidence
              (:error (checker/evidence-verdict true ev)))))))
+
+;; ---------------------------------------------------------------------------
+;; Membership evidence (Job 08). Conf-line fixtures are verbatim from the
+;; SUT's JoinModeTest run (2026-08-05, in-JVM mini cluster): a join
+;; committed as the transitional (old,new) entry at index 3 and its
+;; stable follow-up at index 5; index 0 is the elected leader's initial
+;; conf. Only transitional lines (old=peers:…) may count — every new
+;; leader re-appends the current conf as a STABLE entry at its startup
+;; index (LeaderStateImpl.StartupLogEntry at 3.2.2), so elections would
+;; otherwise masquerade as conf changes.
+;; ---------------------------------------------------------------------------
+
+(def observed-initial-conf-line
+  (str "2026-08-05 20:49:18.057 [n1@group-ABBC16E54704-LeaderElection1] "
+       "INFO org.apache.ratis.server.RaftServer$Division - "
+       "n1@group-ABBC16E54704: set configuration conf: {index: 0, "
+       "cur=peers:[n1|127.0.0.1:34283, n2|127.0.0.1:41851, "
+       "n3|127.0.0.1:35607]|listeners:[], old=null}"))
+
+(def observed-transitional-conf-line
+  (str "2026-08-05 20:49:18.481 [n1@group-ABBC16E54704-LeaderStateImpl] "
+       "INFO org.apache.ratis.server.RaftServer$Division - "
+       "n1@group-ABBC16E54704: set configuration conf: {index: 3, "
+       "cur=peers:[n1|127.0.0.1:34283, n2|127.0.0.1:41851, "
+       "n3|127.0.0.1:35607, n4|127.0.0.1:39429]|listeners:[], "
+       "old=peers:[n1|127.0.0.1:34283, n2|127.0.0.1:41851, "
+       "n3|127.0.0.1:35607]|listeners:[]}"))
+
+(def observed-stable-conf-line
+  (str "2026-08-05 20:49:18.495 [n1@group-ABBC16E54704-LeaderStateImpl] "
+       "INFO org.apache.ratis.server.RaftServer$Division - "
+       "n1@group-ABBC16E54704: set configuration conf: {index: 5, "
+       "cur=peers:[n1|127.0.0.1:34283, n2|127.0.0.1:41851, "
+       "n3|127.0.0.1:35607, n4|127.0.0.1:39429]|listeners:[], old=null}"))
+
+(deftest conf-transition-index-extraction
+  (testing "transitional lines count once per index across all nodes;
+            stable lines (initial conf, leader startup re-appends, the
+            committed follow-up) never do"
+    (is (= [3]
+           (checker/conf-transition-indexes
+             {"n1" (str observed-initial-conf-line "\n"
+                        observed-transitional-conf-line "\n"
+                        observed-stable-conf-line "\n")
+              ;; the same transitional entry replicated to another node —
+              ;; deduplicated by index
+              "n2" observed-transitional-conf-line
+              "n3" nil}))))
+  (testing "distinct transitional indexes accumulate, sorted"
+    (is (= [3 9]
+           (checker/conf-transition-indexes
+             {"n1" observed-transitional-conf-line
+              "n2" (clojure.string/replace observed-transitional-conf-line
+                                           "{index: 3," "{index: 9,")}))))
+  (testing "no logs, no indexes"
+    (is (= [] (checker/conf-transition-indexes {"n1" nil "n2" ""})))))
+
+(deftest membership-ops-detection
+  (testing "membership moves and the probe owe evidence"
+    (is (checker/membership-ops? (history [(nem 10 :member-add)
+                                           (nem 10.5 :member-add)])))
+    (is (checker/membership-ops? (history [(nem 10 :listener-add)
+                                           (nem 10.5 :listener-add)]))))
+  (testing "client ops and other nemeses do not"
+    (is (not (checker/membership-ops?
+               (history (ok-traffic 0 5)
+                        [(nem 10 :crash) (nem 10.5 :crash)
+                         (nem 30 :transfer) (nem 30.5 :transfer)]))))))
+
+(deftest membership-verdict-decision
+  (testing "required and enough transitions: valid, counts reported"
+    (let [v (checker/membership-verdict true 2 [3 9 14])]
+      (is (true? (:valid? v)))
+      (is (= 3 (:transitions v)))))
+  (testing "required and too few: the distinct conf-change failure"
+    (let [v (checker/membership-verdict true 2 [3])]
+      (is (false? (:valid? v)))
+      (is (= :no-conf-change-evidence (:error v)))))
+  (testing "required and zero: same distinct failure"
+    (is (= :no-conf-change-evidence
+           (:error (checker/membership-verdict true 2 [])))))
+  (testing "not required: valid with a note, counts still reported"
+    (let [v (checker/membership-verdict false 2 [])]
+      (is (true? (:valid? v)))
+      (is (some? (:note v))))))
+
+(deftest joined-nodes-extraction
+  (let [h (history
+            [(nem 10 :member-add)
+             (assoc (nem 12 :member-add)
+                    :value {:move :add, :target "n6"
+                            :result {:success? true}})
+             (nem 20 :member-add)
+             (assoc (nem 22 :member-add)
+                    :value {:move :add, :target "n7"
+                            :result {:error [:x "boom"]}})
+             (nem 30 :member-replace-done)
+             (assoc (nem 33 :member-replace-done)
+                    :value {:move :replace-done, :victim "n2"
+                            :add {:target "n7"
+                                  :result {:success? true}}})])]
+    (testing "successful adds count — from :member-add and from the add
+              half of :member-replace-done; failed adds do not"
+      (is (= ["n6" "n7"] (checker/joined-nodes h))))))
+
+(deftest joiner-install-verdict-decision
+  (testing "not required: valid with a note"
+    (is (true? (:valid? (checker/joiner-install-verdict
+                          false [] {})))))
+  (testing "required but nothing joined: distinct error"
+    (let [v (checker/joiner-install-verdict true [] {"n6" 3})]
+      (is (false? (:valid? v)))
+      (is (= :no-committed-join (:error v)))))
+  (testing "joined but no receive evidence on any joiner: distinct error"
+    (let [v (checker/joiner-install-verdict
+              true ["n6"] {"n6" 0, "n3" 7})]
+      (is (false? (:valid? v)))
+      (is (= :no-joiner-install-evidence (:error v)))))
+  (testing "a joiner with receive evidence: valid, counts quoted"
+    (let [v (checker/joiner-install-verdict
+              true ["n6" "n7"] {"n6" 2, "n7" 0})]
+      (is (true? (:valid? v)))
+      (is (= ["n6"] (:joined-with-installs v)))
+      (is (= {"n6" 2, "n7" 0} (:receive-counts v))))))

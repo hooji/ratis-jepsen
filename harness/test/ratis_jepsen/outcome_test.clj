@@ -35,6 +35,7 @@
              ReadException
              ReadIndexException
              ResourceUnavailableException
+             ServerNotReadyException
              StateMachineException
              TimeoutIOException)
            (org.apache.ratis.retry RetryPolicies)))
@@ -127,6 +128,22 @@
   (testing "read path: :fail"
     (is (= {:type :fail :error :leader-not-ready}
            (outcome/classify :read leader-not-ready)))))
+
+(deftest row-server-not-ready
+  ;; Job 08: a division that is STARTING (mid-boot) or CLOSED (a removed
+  ;; peer's self-shutdown) rejects with ServerNotReadyException — routine
+  ;; during crash restarts and membership churn, and quiet: this request
+  ;; was rejected, but the invocation may be a retry whose earlier
+  ;; attempt applied.
+  (let [snr (ServerNotReadyException. "n3 is not in [RUNNING]: current state is CLOSED")]
+    (testing "write path: ambiguous, quietly"
+      (is (= {:type :info :error :server-not-ready}
+             (outcome/classify :write snr)))
+      (is (= {:type :info :error :server-not-ready}
+             (outcome/classify :cas snr))))
+    (testing "read path: :fail"
+      (is (= {:type :fail :error :server-not-ready}
+             (outcome/classify :read snr))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Rows: definite-failure exceptions ⇒ :fail for writes and reads

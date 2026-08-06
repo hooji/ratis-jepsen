@@ -17,20 +17,35 @@
 
   M2 shape: the register workload over independent keys, a fault schedule
   chosen by --nemesis, knossos linearizability checking per key plus the
-  whole-history liveness checker (and, for snapshot-churn runs, the
-  install-snapshot evidence checker). `clojure -M:run test --help` for
-  the options; the interesting ones:
+  whole-history liveness checker (and, per kind, the evidence checkers:
+  install-snapshot for snapshot-churn, committed-conf-change for
+  membership, joiner-install for the combined kind).
+  `clojure -M:run test --help` for the options; the interesting ones:
 
     --workload register        (the only workload until M3)
-    --nemesis none|partition|crash|pause|mixed|snapshot-churn|transfer|mixed-all
+    --nemesis none|partition|crash|pause|mixed|snapshot-churn|transfer|
+              membership|membership-snapshot-churn|listener-probe|mixed-all
                                fault schedule (default none); crash =
                                kill -9/restart of a leader-biased random
                                minority, pause = SIGSTOP/SIGCONT,
                                snapshot-churn = kill a follower + snapshot
                                and purge live servers + restart it
                                (forcing install-snapshot), transfer =
-                               periodic leadership transfer, mixed = the
-                               M1 three, mixed-all = all five
+                               periodic leadership transfer, membership =
+                               randomized add/remove/replace-dead over the
+                               n6/n7 pool (voter band 5±2, floor 3),
+                               membership-snapshot-churn = membership and
+                               churn segments interleaved (joins must
+                               catch up via install-snapshot),
+                               listener-probe = the bounded scripted
+                               listener-staging sequence, mixed = the M1
+                               three, mixed-all = all six fault kinds
+
+                               Membership-bearing kinds run the full
+                               7-node topology: the harness overrides
+                               --nodes with the contract node list, so
+                               run.sh's five-voter default keeps working
+                               unchanged.
     --reads leader|follower|mixed
                                where linearizable reads go (default
                                leader; follower exercises
@@ -39,6 +54,14 @@
                                exhausts first
     --key-count 5 --ops-per-key 400 --concurrency 10   the DESIGN 2.5
                                knossos budget
+    --rate N                   ops/s per worker. Defaults are per kind:
+                               10 (the M0 behavior) everywhere except
+                               membership-snapshot-churn, which defaults
+                               to the Job 07 churn numbers (rate 1.4,
+                               ops-per-key 800) so its write stream
+                               crosses the purge-gap milestones without
+                               extra flags — CI passes only --nemesis and
+                               --time-limit
     --seed-bug stale-reads     start every node with the SUT's seeded bug
                                (the red-run lever; testing the harness)
     --store-dir DIR            where jepsen's store/ output lands"
@@ -48,6 +71,7 @@
             [jepsen.tests :as tests]
             [ratis-jepsen.client :as client]
             [ratis-jepsen.db :as db]
+            [ratis-jepsen.env-contract :as env]
             [ratis-jepsen.nemesis :as nemesis]
             [ratis-jepsen.workload.register :as register]))
 
@@ -115,12 +139,31 @@
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
+   [nil "--membership-calm-s SECONDS" "Membership cycle: calm stretch before each move"
+    :default (:calm-s nemesis/default-membership-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--membership-replace-dead-s SECONDS" "Membership cycle: how long a replace-dead's victim stays dead-and-removed before the replacement half runs"
+    :default (:replace-dead-s nemesis/default-membership-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--membership-min-conf-changes NUMBER" "Evidence floor for dedicated membership runs: at least this many committed configuration changes must appear in the node logs"
+    :default 2
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
    [nil "--reads MODE" "Where linearizable reads are sent: leader (sendReadOnly, M0 behavior), follower (sendReadOnly to a non-leader peer), or mixed (50/50)"
     :default "leader"
     :validate [#{"leader" "follower" "mixed"} "Must be: leader, follower or mixed"]]
 
-   [nil "--rate OPS-PER-SECOND" "Approximate ops per second per worker (default 10, the M0 behavior). Snapshot-churn runs lower this so writes keep flowing across the whole run instead of exhausting the op budget early."
-    :default 10.0
+   ;; No cli-level default: the effective default is per nemesis kind
+   ;; (workload-defaults) — 10.0 everywhere except the combined
+   ;; membership-snapshot-churn kind, whose runs need the Job 07 churn
+   ;; write stream without extra flags (CI passes only --nemesis and
+   ;; --time-limit).
+   [nil "--rate OPS-PER-SECOND" "Approximate ops per second per worker (default 10, the M0 behavior; membership-snapshot-churn defaults to 1.4 — the sustained stream that crosses purge-gap milestones)"
     :parse-fn #(Double/parseDouble %)
     :validate [pos? "Must be positive"]]
 
@@ -132,9 +175,10 @@
    ;; Default shrunk from the brief's 400 after a reference run's key
    ;; history (400 ops with ~40 partition-:info) blew knossos's memory —
    ;; the sanctioned lever ("if analysis exceeds the budget, shrink
-   ;; ops-per-key and say so"); DESIGN 2.5 pins only <=400.
-   [nil "--ops-per-key NUMBER" "Hard cap on ops per key (the knossos budget)"
-    :default 300
+   ;; ops-per-key and say so"); DESIGN 2.5 pins only <=400. Like --rate,
+   ;; the default is per kind: 300 everywhere except
+   ;; membership-snapshot-churn (800, the Job 07 churn budget).
+   [nil "--ops-per-key NUMBER" "Hard cap on ops per key (the knossos budget; default 300, membership-snapshot-churn 800)"
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
@@ -157,29 +201,59 @@
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]])
 
+(defn workload-defaults
+  "Fills :rate and :ops-per-key when the CLI left them unset — per
+  nemesis kind: the combined membership-snapshot-churn kind inherits the
+  Job 07 churn numbers (rate 1.4, ops-per-key 800 — the sustained write
+  stream that crosses the server's purge.gap=1024 milestones), every
+  other kind keeps the M0 defaults (10.0, 300). Explicit CLI values
+  always win."
+  [opts]
+  (let [churny? (= "membership-snapshot-churn" (:nemesis opts))]
+    (-> opts
+        (update :rate        #(or % (if churny? 1.4 10.0)))
+        (update :ops-per-key #(or % (if churny? 800 300))))))
+
 (defn ratis-test
   "Builds the test map from parsed CLI options: register workload +
-  chosen nemesis over the db/client/outcome stack from Job 03."
+  chosen nemesis over the db/client/outcome stack from Job 03.
+
+  Membership-bearing kinds (nemesis/membership-kinds) get two additions:
+  :nodes is overridden to the full DESIGN 2.6 topology — the dormant
+  n6/n7 pool exists for exactly this, and run.sh's pinned five-voter
+  --nodes must keep working for every other kind — and the test map
+  carries the :membership-state atom that the membership nemesis, the
+  db layer (start mode per node) and fault targeting share."
   [opts]
   ;; jepsen.store writes under its base-dir var; point it wherever the
   ;; caller asked (env/run.sh test passes /ratis-jepsen/store so results
   ;; land on the bind mount outside the container).
   (alter-var-root #'store/base-dir (constantly (:store-dir opts)))
-  (let [workload ((workloads (:workload opts)) opts)
-        nem      (nemesis/package (:nemesis opts) opts)]
+  (let [opts        (workload-defaults opts)
+        membership? (contains? nemesis/membership-kinds (:nemesis opts))
+        nodes       (if membership?
+                      (vec env/all-nodes)
+                      (:nodes opts))
+        workload    ((workloads (:workload opts)) opts)
+        nem         (nemesis/package (:nemesis opts) opts)]
     (merge tests/noop-test
            opts
            {:name      (str "ratis-kv-" (:workload opts)
                             "-" (:nemesis opts)
                             (when (:seed-bug opts)
                               (str "-seedbug-" (:seed-bug opts))))
+            :nodes     nodes
             :db        (db/db (:seed-bug opts))
             :client    (client/client)
             :nemesis   (:nemesis nem)
             :checker   (:checker workload)
             :generator (->> (:generator workload)
                             (gen/nemesis (:generator nem))
-                            (gen/time-limit (:time-limit opts)))})))
+                            (gen/time-limit (:time-limit opts)))}
+           (when membership?
+             {:membership-state
+              (atom (nemesis/initial-membership-state
+                      env/all-nodes env/initial-voters))}))))
 
 (defn -main
   [& args]

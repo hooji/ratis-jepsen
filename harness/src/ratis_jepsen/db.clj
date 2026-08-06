@@ -84,6 +84,29 @@
            "--storage" env/storage-dir]
     seed-bug (conj "--seed-bug" seed-bug)))
 
+(defn join-server-args
+  "argv for a node in --join mode (Job 08, membership pool): the peers
+  list is the full 7-node address book (only the self entry is consumed,
+  for the bind port), --join makes the server form no group — on empty
+  storage it awaits GroupManagementApi.add; on existing storage the
+  ratis-3.2.2 startup scan recovers the stored group, which makes this
+  the correct restart mode for any dynamically-joined node too."
+  [node seed-bug]
+  (cond-> ["--id" node
+           "--peers" (peers-spec env/all-nodes)
+           "--storage" env/storage-dir
+           "--join"]
+    seed-bug (conj "--seed-bug" seed-bug)))
+
+(defn dynamic-node?
+  "Does `node` start in --join mode for this test? True iff the test map
+  carries Job 08's membership state (an atom under :membership-state)
+  and the node is in its :dynamic set — the initial pool (n6/n7) plus
+  every node the membership nemesis has since moved through the pool.
+  Non-membership runs carry no state and every node starts the M0 way."
+  [test node]
+  (boolean (some-> (:membership-state test) deref :dynamic (contains? node))))
+
 (defn select-tarball
   "Picks the SUT tarball from a seq of file names. Exactly one match is
   the expected case; several (stale versions lying around) picks the
@@ -156,15 +179,19 @@
   CLI, stdout+stderr appended to the contract log, pidfile. Returns
   :started or :already-running (pidfile-based check only — the launcher
   script execs java, so executable matching would misfire)."
-  [node seed-bug]
-  (c/exec :mkdir :-p env/storage-dir)
-  (apply cu/start-daemon!
-         {:logfile env/log-file
-          :pidfile pid-file
-          :chdir   env/install-dir
-          :match-executable? false}
-         env/bin-path
-         (server-args node seed-bug)))
+  ([node seed-bug]
+   (start!* node seed-bug false))
+  ([node seed-bug join?]
+   (c/exec :mkdir :-p env/storage-dir)
+   (apply cu/start-daemon!
+          {:logfile env/log-file
+           :pidfile pid-file
+           :chdir   env/install-dir
+           :match-executable? false}
+          env/bin-path
+          (if join?
+            (join-server-args node seed-bug)
+            (server-args node seed-bug)))))
 
 (defn kill!*
   "kill -9 by pidfile, then removes the pidfile. No-op if no pidfile."
@@ -203,6 +230,15 @@
   []
   (c/exec :rm :-rf env/storage-dir env/log-file))
 
+(defn wipe-storage!
+  "Removes the raft storage dir ONLY, preserving the log (Job 08: the
+  membership nemesis returns a removed/replaced node to the clean pool
+  posture mid-run — the storage must go so the node can be re-added as a
+  fresh joiner, but the log is run evidence and must survive to the
+  store snarf)."
+  []
+  (c/exec :rm :-rf env/storage-dir))
+
 ;; ---------------------------------------------------------------------------
 ;; Leader census (best-effort, for nemesis targeting bias only)
 ;; ---------------------------------------------------------------------------
@@ -238,6 +274,83 @@
        vec))
 
 ;; ---------------------------------------------------------------------------
+;; Conf census (Job 08). Every replica logs each configuration it adopts:
+;;
+;;   <id>@group-…: set configuration conf: {index: 5, cur=peers:[n1|n1:6000,
+;;   n2|n2:6000]|listeners:[n7|n7:6000], old=null}
+;;
+;; (ServerState.setRaftConf at ratis-3.2.2; phrasing observed live in the
+;; SUT's JoinModeTest and pinned there and in the evidence checker.) The
+;; highest index across nodes is the best available estimate of the
+;; current conf — the API alternative, GroupInfoReply's conf field, is
+;; dropped by the 3.2.2 wire serializer and always arrives empty. The
+;; census backs the membership nemesis's COMPARE_AND_SET arguments; a
+;; stale answer surfaces as SetConfigurationException and is retried,
+;; never trusted for correctness.
+;; ---------------------------------------------------------------------------
+
+(def conf-line-pattern
+  "Matches one 'set configuration' log line, capturing the conf index,
+  the cur= servers list body, the cur= listeners list body and the old=
+  tail (null for a stable conf, peers:… for a transitional one)."
+  #"set configuration conf: \{index: (\d+), cur=peers:\[([^\]]*)\]\|listeners:\[([^\]]*)\], old=(null|peers:.*)\}")
+
+(defn- parse-peer-ids
+  "Node ids from a conf-line peer-list body: \"n1|n1:6000, n2|n2:6000\"
+  -> [\"n1\" \"n2\"]. Empty body -> []."
+  [body]
+  (if (str/blank? body)
+    []
+    (mapv #(first (str/split % #"\|"))
+          (str/split (str/trim body) #",\s*"))))
+
+(defn parse-conf-line
+  "Parses a 'set configuration' log line into
+  {:index long, :servers [ids], :listeners [ids], :stable? bool}, or nil
+  when the line does not match (pure; unit-tested)."
+  [line]
+  (when line
+    (when-let [[_ index servers listeners old] (re-find conf-line-pattern line)]
+      {:index     (Long/parseLong index)
+       :servers   (parse-peer-ids servers)
+       :listeners (parse-peer-ids listeners)
+       :stable?   (= old "null")})))
+
+(defn last-conf-line!
+  "The last 'set configuration' line in the current node's log, or nil."
+  []
+  (let [out (try (c/exec :bash :-c (str "grep 'set configuration conf' "
+                                        env/log-file
+                                        " 2>/dev/null | tail -n 1"))
+                 (catch Exception _ ""))]
+    (when-not (str/blank? out) out)))
+
+(defn conf-line-count!
+  "How many 'set configuration' lines the current node's log holds — the
+  listener probe's replication census (conf entries are ordinary log
+  entries, so their arrival proves log replication reached the node)."
+  []
+  (let [out (try (c/exec :bash :-c (str "grep -c 'set configuration conf' "
+                                        env/log-file " 2>/dev/null || true"))
+                 (catch Exception _ "0"))]
+    (try (Long/parseLong (str/trim out))
+         (catch Exception _ 0))))
+
+(defn conf-census!
+  "Best-effort census of the group's current configuration: every node's
+  last adopted conf, highest index wins (a removed or lagging node's
+  view is older, never newer). Returns {:index n, :servers [...],
+  :listeners [...], :stable? b} or nil when no node has adopted any conf
+  yet (cluster still electing its first leader)."
+  [test]
+  (->> (c/on-nodes test (fn [_test _node]
+                          (parse-conf-line (last-conf-line!))))
+       vals
+       (keep identity)
+       (sort-by :index)
+       last))
+
+;; ---------------------------------------------------------------------------
 ;; Jepsen DB
 ;; ---------------------------------------------------------------------------
 
@@ -259,9 +372,13 @@
   ;; Kill/restart primitives from day one (DESIGN 2.2) — M1's crash
   ;; nemesis calls these. Restart goes through the same start!* as first
   ;; boot: the SUT opens its storage with StartupOption.RECOVER either way.
+  ;; Membership runs (Job 08) start :dynamic nodes — the pool plus every
+  ;; node that has been through it — in --join mode: fresh storage awaits
+  ;; bootstrap, existing storage recovers, so the same call is right for
+  ;; first boots, crash restarts and pool returns alike.
   jdb/Kill
-  (start! [_this _test node]
-    (start!* node seed-bug))
+  (start! [_this test node]
+    (start!* node seed-bug (dynamic-node? test node)))
 
   (kill! [_this _test _node]
     (kill!*))

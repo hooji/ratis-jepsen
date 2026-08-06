@@ -44,6 +44,7 @@ import org.apache.ratis.statemachine.TransactionContext;
 import org.apache.ratis.statemachine.impl.BaseStateMachine;
 import org.apache.ratis.statemachine.impl.SimpleStateMachineStorage;
 import org.apache.ratis.statemachine.impl.SingleFileSnapshotInfo;
+import org.apache.ratis.util.LifeCycle;
 import org.apache.ratis.util.MD5FileUtil;
 
 import ratis.jepsen.kv.KvCodec.Reply;
@@ -128,16 +129,41 @@ public class KvStateMachine extends BaseStateMachine {
   public void initialize(RaftServer server, RaftGroupId groupId, RaftStorage raftStorage)
       throws IOException {
     super.initialize(server, groupId, raftStorage);
-    storage.init(raftStorage);
-    if (seedBug != null) {
-      LOG.warn(String.format(SEED_BUG_BANNER_FORMAT, seedBug.cliName()));
-    }
-    reinitialize();
+    // Lifecycle discipline (Job 08 find): the live install-snapshot path
+    // pauses the SM before replacing its storage
+    // (ServerState.installSnapshot at ratis-3.2.2), and
+    // StateMachineUpdater.reload() hard-asserts the PAUSED lifecycle state
+    // — closing the whole division when the assert fails.
+    // BaseStateMachine.pause() is an EMPTY method that never touches the
+    // lifecycle, so without explicit management here every streamed
+    // install killed the receiving division (observed live on Job 08's
+    // combined membership+snapshot-churn runs; upstream's own
+    // SimpleStateMachine4Testing does exactly this bookkeeping, which is
+    // why upstream's install tests pass). RUNNING after initialize,
+    // PAUSED in pause(), back to RUNNING after the post-install
+    // reinitialize.
+    getLifeCycle().startAndTransition(() -> {
+      storage.init(raftStorage);
+      if (seedBug != null) {
+        LOG.warn(String.format(SEED_BUG_BANNER_FORMAT, seedBug.cliName()));
+      }
+      load(storage.loadLatestSnapshot());
+    });
+  }
+
+  @Override
+  public void pause() {
+    getLifeCycle().transition(LifeCycle.State.PAUSING);
+    getLifeCycle().transition(LifeCycle.State.PAUSED);
   }
 
   @Override
   public void reinitialize() throws IOException {
     load(storage.loadLatestSnapshot());
+    if (getLifeCycleState() == LifeCycle.State.PAUSED) {
+      getLifeCycle().transition(LifeCycle.State.STARTING);
+      getLifeCycle().transition(LifeCycle.State.RUNNING);
+    }
   }
 
   @Override

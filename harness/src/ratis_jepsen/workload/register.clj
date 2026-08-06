@@ -107,6 +107,28 @@
                            (rj-checker/install-snapshot-evidence
                              {:require-evidence?
                               (= "snapshot-churn" (:nemesis opts))})
+                           ;; Job 08's law: a dedicated membership run
+                           ;; must prove committed conf changes; the
+                           ;; combined kind must additionally show
+                           ;; install-snapshot on a node that joined
+                           ;; during the run. The listener probe and
+                           ;; mixed-all report counts without requiring
+                           ;; them (a probe wedge is a reportable
+                           ;; outcome, and mixed-all's membership share
+                           ;; is not guaranteed a committed move).
+                           :membership-evidence
+                           (rj-checker/membership-evidence
+                             {:require-evidence?
+                              (contains? #{"membership"
+                                           "membership-snapshot-churn"}
+                                         (:nemesis opts))
+                              :min-changes
+                              (:membership-min-conf-changes opts 2)})
+                           :joiner-install-evidence
+                           (rj-checker/joiner-install-evidence
+                             {:require-evidence?
+                              (= "membership-snapshot-churn"
+                                 (:nemesis opts))})
                            :stats      (checker/stats)
                            :exceptions (checker/unhandled-exceptions)}
                     gnuplot? (assoc :perf (checker/perf))))}))

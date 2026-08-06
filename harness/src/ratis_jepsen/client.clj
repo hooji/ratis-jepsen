@@ -43,7 +43,9 @@
            (org.apache.ratis.client RaftClient)
            (org.apache.ratis.conf RaftProperties)
            (org.apache.ratis.protocol Message RaftClientReply RaftGroup
-                                      RaftGroupId RaftPeer RaftPeerId)
+                                      RaftGroupId RaftPeer RaftPeerId
+                                      SetConfigurationRequest$Arguments
+                                      SetConfigurationRequest$Mode)
            (org.apache.ratis.retry RetryPolicies)
            (org.apache.ratis.util TimeDuration)))
 
@@ -249,6 +251,111 @@
     {:success? (.isSuccess reply)}))
 
 ;; ---------------------------------------------------------------------------
+;; Membership admin interop (Job 08 — the M2 membership-churn nemesis and
+;; the listener-staging probe; every call verified against ratis-3.2.2)
+;; ---------------------------------------------------------------------------
+
+(defn member-peer
+  "One RaftPeer for a node name at the contract raft port — what
+  setConfiguration's server/listener lists are built from (the conf entry
+  carries these addresses to every replica, so they must be real)."
+  ^RaftPeer [node]
+  (-> (RaftPeer/newBuilder)
+      (.setId ^String node)
+      (.setAddress (str node ":" env/raft-port))
+      (.build)))
+
+(defn group-add!
+  "Bootstraps a join-mode server into the group:
+  GroupManagementApi.add on `node` with the EMPTY-peers group
+  (RaftGroup.valueOf(groupId) — the upstream reconfiguration-test shape,
+  MiniRaftCluster.addNewPeers at 3.2.2). The created division has an
+  empty conf, so it cannot start elections (LeaderElection's NOT_IN_CONF
+  guard) until setConfiguration commits it in; it learns peers and log
+  from the leader. The client's group-spec must contain `node` so the
+  call can be routed to it. Throws on failure; AlreadyExistsException
+  (division already bootstrapped by an earlier attempt) is a legal
+  outcome callers tolerate."
+  [^RaftClient client node]
+  (let [^RaftClientReply reply (-> client
+                                   (.getGroupManagementApi
+                                     (RaftPeerId/valueOf ^String node))
+                                   (.add (RaftGroup/valueOf
+                                           (RaftGroupId/valueOf env/group-uuid)
+                                           ^"[Lorg.apache.ratis.protocol.RaftPeer;"
+                                           (make-array RaftPeer 0))))]
+    {:success? (.isSuccess reply)}))
+
+(defn set-configuration-cas!
+  "AdminApi.setConfiguration through SetConfigurationRequest.Arguments in
+  COMPARE_AND_SET mode: the new conf (servers + listeners, node names)
+  applies only if the current conf still equals current-servers /
+  current-listeners — mismatch throws SetConfigurationException, which
+  callers treat as census-stale-retry, never a nemesis crash.
+
+  Uses the Arguments builder EXCLUSIVELY: the (RaftPeer[], RaftPeer[])
+  convenience overload is broken at 3.2.2 (RATIS-2640, our upstream find
+  — it drops the servers into the listeners slot; fixed on master, not
+  in 3.2.2)."
+  [^RaftClient client {:keys [servers listeners current-servers
+                              current-listeners]}]
+  (let [args (-> (SetConfigurationRequest$Arguments/newBuilder)
+                 (.setServersInNewConf
+                   ^java.util.List (mapv member-peer servers))
+                 (.setListenersInNewConf
+                   ^java.util.List (mapv member-peer (or listeners [])))
+                 (.setServersInCurrentConf
+                   ^java.util.List (mapv member-peer current-servers))
+                 (.setListenersInCurrentConf
+                   ^java.util.List (mapv member-peer (or current-listeners [])))
+                 (.setMode SetConfigurationRequest$Mode/COMPARE_AND_SET)
+                 (.build))
+        ^RaftClientReply reply (.setConfiguration (.admin client) args)]
+    {:success? (.isSuccess reply)}))
+
+(defn open-probe-client
+  "A RaftClient with NO retries: one attempt, raw outcome. Probe tooling
+  only — the listener census wants the exact exception a single
+  targeted read produces, not a RaftRetryFailureException wrapper after
+  four masked attempts (the first probe run's reads exhausted retries
+  and the per-attempt cause was unrecoverable from the record)."
+  ^RaftClient [id->address]
+  (-> (RaftClient/newBuilder)
+      (.setProperties (RaftProperties.))
+      (.setRaftGroup (raft-group id->address))
+      (.setRetryPolicy (RetryPolicies/noRetry))
+      (.build)))
+
+(defn targeted-read!
+  "One linearizable read routed at `node` (sendReadOnly(msg, peerId)),
+  returning the raw reply string; throws on failure. Probe tooling: the
+  Job 08 listener census sends one of these AT the staged listener —
+  whether a listener serves (or cleanly refuses) a linearizable read is
+  exactly the RATIS-1825/RATIS-2511-adjacent signal the probe records."
+  [^RaftClient client node ^String request]
+  (-> (.sendReadOnly (.io client) (Message/valueOf request)
+                     (RaftPeerId/valueOf ^String node))
+      .getMessage .getContent .toStringUtf8))
+
+(defn group-members
+  "Queries `node` for its view of the group's member set
+  (GroupManagementApi.info): the reply's group is built server-side from
+  the division's CURRENT conf (Division.getGroup at 3.2.2), so this is a
+  conf census by API. Returns the sorted node-name vector — voters and
+  listeners merged, because the reply's role-split conf field is dropped
+  by the 3.2.2 wire serializer (toGroupInfoReplyProto never sets it; the
+  role-split census therefore comes from the log lines instead, db.clj).
+  Throws on transport errors."
+  [^RaftClient client node]
+  (let [reply (-> client
+                  (.getGroupManagementApi (RaftPeerId/valueOf ^String node))
+                  (.info (RaftGroupId/valueOf env/group-uuid)))]
+    (->> (.getPeers (.getGroup reply))
+         (map #(str (.getId ^RaftPeer %)))
+         sort
+         vec)))
+
+;; ---------------------------------------------------------------------------
 ;; Jepsen client
 ;; ---------------------------------------------------------------------------
 
@@ -259,10 +366,23 @@
     ;; client may talk to any node (the library routes to the leader).
     ;; The read mode comes from the test map (--reads, default leader);
     ;; follower targets are drawn from the client's own peer set.
-    (assoc this
-           :raft-client (open-raft-client group-spec)
-           :reads-mode  (keyword (or (:reads test) "leader"))
-           :peers       (vec (keys group-spec))))
+    ;;
+    ;; Membership runs (Job 08): a worker opened mid-run — jepsen spawns
+    ;; a fresh process after every :info — must not aim at the STATIC
+    ;; initial voters, some of which may be pooled by then (a pooled
+    ;; ex-voter hosts no group and answers GroupMismatchException). The
+    ;; spec is taken from the shared membership state's intended voters
+    ;; instead; from there the client self-heals — every
+    ;; NotLeaderException reply carries the group's current peer list
+    ;; and the 3.2.2 client swaps it in (RaftClientImpl.refreshPeers),
+    ;; so workers follow the conf as it churns.
+    (let [spec (if-let [state (:membership-state test)]
+                 (node-addresses (sort (:voters @state)))
+                 group-spec)]
+      (assoc this
+             :raft-client (open-raft-client spec)
+             :reads-mode  (keyword (or (:reads test) "leader"))
+             :peers       (vec (keys spec)))))
 
   (setup! [_this _test])
 
