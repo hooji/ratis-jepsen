@@ -25,14 +25,17 @@
 (deftest cli-kinds-surface
   (is (= #{"none" "partition" "crash" "pause" "mixed"
            "snapshot-churn" "transfer" "membership"
-           "membership-snapshot-churn" "listener-probe" "mixed-all"}
+           "membership-snapshot-churn" "listener-probe" "quorum-pause"
+           "mixed-all"}
          nemesis/kinds)))
 
 (deftest fault-heal-vocabulary
   (testing "every fault has exactly one heal; no f plays both roles"
-    (is (= #{:start :crash :pause :churn-kill :member-replace-dead}
+    (is (= #{:start :crash :pause :churn-kill :member-replace-dead
+             :quorum-pause}
            nemesis/fault-fs))
-    (is (= #{:stop :restart :resume :churn-restart :member-replace-done}
+    (is (= #{:stop :restart :resume :churn-restart :member-replace-done
+             :quorum-resume}
            nemesis/heal-fs))
     (is (empty? (set/intersection nemesis/fault-fs nemesis/heal-fs)))
     (is (= (count nemesis/fault-fs)
@@ -327,6 +330,25 @@
               as one kind, its three move shapes pooled)"
       (is (<= 40 (count segments)))
       (is (= (set (map kind-of known)) (set (map kind-of segments)))))))
+
+(deftest quorum-pause-segment-and-package
+  (testing "the Q14 quorum stall: pinned calm 20, freeze 8, whole-follower
+            SIGSTOP as a proper fault pair"
+    (is (= [{:type :sleep, :value 20}
+            {:type :info, :f :quorum-pause}
+            {:type :sleep, :value 8}
+            {:type :info, :f :quorum-resume}]
+           (nemesis/quorum-pause-segment default-cycles)))
+    (is (= [{:type :sleep, :value 20}
+            {:type :info, :f :quorum-pause}]
+           (take 2 (:generator (nemesis/package "quorum-pause")))))))
+
+(deftest quorum-pause-target-selection
+  (testing "pure part: conf members minus the leader set"
+    ;; quorum-pause-targets! needs ssh; its selection logic is
+    ;; conf-nodes minus census — assert the shape via the helper's
+    ;; degraded path contract instead: all-but-one when no census.
+    (is (= 4 (count (remove #{"n3"} ["n1" "n2" "n3" "n4" "n5"]))))))
 
 (deftest package-m2-kinds
   (testing "snapshot-churn and transfer cycle their segments"

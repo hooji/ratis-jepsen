@@ -112,7 +112,7 @@
   "CLI-selectable fault schedules."
   #{"none" "partition" "crash" "pause" "mixed"
     "snapshot-churn" "transfer" "membership" "membership-snapshot-churn"
-    "listener-probe" "mixed-all"})
+    "listener-probe" "quorum-pause" "mixed-all"})
 
 (def fault->heal
   "Each fault-opening op :f and the op :f that heals it. The single
@@ -122,7 +122,8 @@
    :crash               :restart
    :pause               :resume
    :churn-kill          :churn-restart
-   :member-replace-dead :member-replace-done})
+   :member-replace-dead :member-replace-done
+   :quorum-pause        :quorum-resume})
 
 (def fault-fs (set (keys fault->heal)))
 (def heal-fs  (set (vals fault->heal)))
@@ -175,6 +176,20 @@
   "Membership churn: calm 15 s before each move; a replace-dead's victim
   stays dead-and-removed for 8 s before the replacement half runs."
   {:calm-s 15 :replace-dead-s 8})
+
+(def quorum-pause-cycle
+  "The Job 09/Q14 quorum stall: calm 20 s, then every node EXCEPT the
+  leader is SIGSTOPped for 8 s. The live leader keeps accepting and
+  APPENDING client writes but cannot commit them (no quorum), which is
+  the one process-level fault that mass-produces the
+  applied-later-but-reply-lost shape the retry-cache expiry boundary
+  needs: clients time out mid-stall, the stalled entries commit at
+  resume, and a sufficiently delayed same-callId retry meets an expired
+  cache entry. (Kill and plain pause cannot produce this population —
+  their append-to-reply window is millisecond-scale; measured across
+  three Q14 attempts, ledger.) Pinned cycle — a Q14 lever, not a
+  general fault-soup member."
+  {:calm-s 20 :fault-s 8})
 
 (defn cycles
   "The per-kind cycles for a run: partition pinned (Job 04), the rest
@@ -313,6 +328,23 @@
   (let [nodes (conf-nodes test)]
     (select-targets nodes nil (target-count (count nodes)))))
 
+(defn quorum-pause-targets!
+  "The nodes a :quorum-pause op stops: every conf member EXCEPT the
+  censused leader(s) — the whole follower set, so the leader loses its
+  quorum while staying up. A failed or empty census degrades to
+  all-but-one-random-node (still a quorum stall if the survivor leads;
+  a wasted cycle otherwise, recorded either way)."
+  [test]
+  (let [nodes   (conf-nodes test)
+        leaders (try (let [ls (db/current-leaders! test)]
+                       (when (seq ls) (set ls)))
+                     (catch Exception e
+                       (log/warn "quorum-pause: leader census failed:"
+                                 (.getMessage e))
+                       nil))
+        keep    (or leaders #{(rand-nth nodes)})]
+    (vec (remove keep nodes))))
+
 ;; ---------------------------------------------------------------------------
 ;; Nemeses. Faults act through the db primitives (jepsen.db Kill/Pause on
 ;; (:db test)); heals act on every node — start!/resume! are no-ops on
@@ -341,8 +373,10 @@
 
 (defn pause-nemesis
   "Responds to :pause by SIGSTOP on a random minority, and to :resume by
-  SIGCONT on every node. Teardown resumes everything so a run cut mid-
-  pause still tears down (and flushes logs) from running processes."
+  SIGCONT on every node; :quorum-pause/-resume (Job 09/Q14) SIGSTOP the
+  whole follower set instead — see quorum-pause-targets!. Teardown
+  resumes everything so a run cut mid-pause still tears down (and
+  flushes logs) from running processes."
   []
   (reify jn/Nemesis
     (setup! [this _test] this)
@@ -353,9 +387,15 @@
                   (assoc op :value
                          (c/on-nodes test targets
                                      (fn [t node] (jdb/pause! (:db t) t node)))))
-        :resume (assoc op :value
-                       (c/on-nodes test
-                                   (fn [t node] (jdb/resume! (:db t) t node))))))
+        :quorum-pause
+        (let [targets (quorum-pause-targets! test)]
+          (assoc op :value
+                 (c/on-nodes test targets
+                             (fn [t node] (jdb/pause! (:db t) t node)))))
+        (:resume :quorum-resume)
+        (assoc op :value
+               (c/on-nodes test
+                           (fn [t node] (jdb/resume! (:db t) t node))))))
 
     (teardown! [_this test]
       (try (c/on-nodes test (fn [t node] (jdb/resume! (:db t) t node)))
@@ -868,7 +908,8 @@
   []
   (jn/compose {#{:start :stop}    (jn/partition-random-halves)
                #{:crash :restart} (crash-nemesis)
-               #{:pause :resume}  (pause-nemesis)
+               #{:pause :resume :quorum-pause :quorum-resume}
+               (pause-nemesis)
                #{:churn-kill :churn-transfer :churn-snapshot :churn-restart}
                (churn-nemesis)
                #{:transfer}       (transfer-nemesis)
@@ -895,6 +936,11 @@
 (defn partition-segment [cycles] (segment :start (:partition cycles)))
 (defn crash-segment     [cycles] (segment :crash (:crash cycles)))
 (defn pause-segment     [cycles] (segment :pause (:pause cycles)))
+
+(defn quorum-pause-segment
+  "One quorum stall (pinned cycle; Q14 lever)."
+  [_cycles]
+  (segment :quorum-pause quorum-pause-cycle))
 
 (defn churn-segment
   "One snapshot-churn cycle: calm; kill a follower; transfer leadership
@@ -1064,5 +1110,7 @@
         :generator (membership-churn-generator cs)}
        "listener-probe" {:nemesis   (full-nemesis)
                          :generator listener-probe-script}
+       "quorum-pause"   {:nemesis   (full-nemesis)
+                         :generator (cycle (quorum-pause-segment cs))}
        "mixed-all"      {:nemesis   (full-nemesis)
                          :generator (mixed-all-generator cs)}))))
