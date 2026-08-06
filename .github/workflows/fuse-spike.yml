@@ -29,19 +29,17 @@
 
 name: fuse-spike
 
-# (spike) workflow_dispatch is the intended trigger (brief), but this session's
-# credentials lack the Actions-dispatch scope (both the MCP app token and
-# the proxy token 404/403 the dispatches endpoint), so a push trigger
-# scoped to THIS FILE on THIS SPIKE BRANCH fires the run instead — the
-# run itself uses the repo's own GITHUB_TOKEN. Deviation documented in
-# the Job 10 report; the whole file is a throwaway.
 on:
-  workflow_dispatch:
+  # Branch-scoped bootstrap trigger, exactly as Job 06 used for jepsen.yml
+  # (commit b1aa0b8): GitHub registers a workflow for API dispatch only
+  # once it has run at least once or exists on the default branch, and
+  # this file lives only on the spike branch — so workflow_dispatch
+  # 404s until then. Removed with the rest of this throwaway file when
+  # M4's real workflow lands. (A paths: filter here did NOT fire; Job
+  # 06's unfiltered shape is the one proven to work in this repo.)
   push:
-    branches:
-      - claude/membership-churn-analysis-nn6hlo
-    paths:
-      - .github/workflows/fuse-spike.yml
+    branches: [claude/membership-churn-analysis-nn6hlo]
+  workflow_dispatch:
 
 permissions:
   contents: read
