@@ -288,7 +288,12 @@ constrain everything downstream and should be settled first.
 
 ## 7. Immediate next steps
 
-*(updated 2026-08-05: **M1 complete** — jobs 05 (nemesis breadth +
+*(updated 2026-08-06: **M2 complete** — job 07 (snapshot churn,
+transfer, follower reads) and job 08 (membership churn, `--join`,
+the `pause()` conviction + fix) merged; three upstream-report
+candidates banked in BACKLOG 7–9; RUNS carries the Job-07
+reinterpretation. **M3 underway**: job 09 exactly-once counter
+workload. Earlier: **M1 complete** — jobs 05 (nemesis breadth +
 liveness; incl. the Review-05-discovered outcome-map false-red, fixed
 via ratified same-callId-retry amendment) and 06 (manual-dispatch CI
 with red-gate, env polish, public README) merged; first full
