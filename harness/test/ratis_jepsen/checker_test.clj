@@ -590,3 +590,30 @@
           v (checker/check-counter-key h)]
       (is (false? (:valid? v)))
       (is (= :lost-update (:kind (first (:violations v))))))))
+
+(deftest counter-observed-totals-are-bounds-checked
+  ;; Job 09 second pass: an :ok add's reported total pins the state at
+  ;; its apply — a double-apply is visible in the TOTALS even when no
+  ;; read lands nearby (the Q14 forensic, automated). Here: two
+  ;; sequential adds of 3 and 4; the second reports total 10, i.e. a
+  ;; pre-state of 6 > the only possible pre-state 3 — the first add
+  ;; applied twice.
+  (testing "an impossible pre-state convicts without any read"
+    (let [h [(cop 0 :invoke :add 3) (cop 0 :ok :add 3 {:observed 3})
+             (cop 0 :invoke :add 4) (cop 0 :ok :add 4 {:observed 10})]
+          v (checker/check-counter-key h)]
+      (is (false? (:valid? v)))
+      (is (= :double-count (:kind (first (:violations v)))))))
+  (testing "consistent totals pass"
+    (let [h [(cop 0 :invoke :add 3) (cop 0 :ok :add 3 {:observed 3})
+             (cop 0 :invoke :add 4) (cop 0 :ok :add 4 {:observed 7})]]
+      (is (true? (:valid? (checker/check-counter-key h))))))
+  (testing "a dedup'd retry's CACHED total stays legal despite the late
+            completion (upper widens with completion, lower pins to
+            invocation)"
+    ;; op A applies first (total 2) but completes LAST (cached reply
+    ;; delivered on a retry); op B applies second (total 5).
+    (let [h [(cop 0 :invoke :add 2)
+             (cop 1 :invoke :add 3) (cop 1 :ok :add 3 {:observed 5})
+             (cop 0 :ok :add 2 {:observed 2})]]
+      (is (true? (:valid? (checker/check-counter-key h)))))))

@@ -621,32 +621,60 @@
         fail-adds   (filterv #(= :fail (:type %)) adds)
         pending     (filterv #(nil? (:type %)) adds)
         maybe-adds  (into (into ok-adds info-adds) pending)
+        bounds-violation
+        ;; The shared interval rule: an observation `v` made by an op
+        ;; invoked at `inv` and completed at `rc` must satisfy
+        ;; lower <= v <= upper. Sound for reads AND for the totals :ok
+        ;; adds report: the total is the state at the add's (first)
+        ;; apply, which lies between its invocation and its completion —
+        ;; for a deduplicated retry the reply is the cached ORIGINAL, so
+        ;; a late completion only widens `upper`, never unsounds it.
+        (fn [what v inv rc self-inv extra]
+          ;; self-inv: for an add's own pre-state check, the add itself
+          ;; must not appear in its upper bound (its delta is not part
+          ;; of its pre-state); nil for reads.
+          (let [v     (or v 0)   ; ABSENT = an untouched counter = 0
+                lower (transduce (clojure.core/comp
+                                   (filter #(and (< (:comp % Long/MAX_VALUE) inv)
+                                                 (not= (:inv %) self-inv)))
+                                   (map :delta))
+                                 + 0 ok-adds)
+                upper (transduce (clojure.core/comp
+                                   (filter #(and (< (:inv %) rc)
+                                                 (not= (:inv %) self-inv)))
+                                   (map :delta))
+                                 + 0 maybe-adds)]
+            (when-not (<= lower v upper)
+              (merge {:kind  (if (< v lower) :lost-update :double-count)
+                      what   (assoc extra :value v)
+                      :lower lower
+                      :upper upper}))))
         read-violations
+        ;; NB: the read's completion index must not be destructured as
+        ;; `comp` — it would shadow clojure.core/comp above (found the
+        ;; hard way).
         (into []
               (keep (fn [{:keys [v inv final?] :as r}]
-                      ;; NB: the read's completion index must not be
-                      ;; destructured as `comp` — it would shadow
-                      ;; clojure.core/comp under the transducers below.
-                      ;; A nil v is the ABSENT reply — an untouched
-                      ;; counter reads as 0 (the SUT's ADD treats an
-                      ;; absent key as 0; found live: the first reads of
-                      ;; a key race its first add and NPE'd the bounds).
-                      (let [v     (or v 0)
-                            rc    (:comp r)
-                            lower (transduce (clojure.core/comp
-                                               (filter #(< (:comp % Long/MAX_VALUE) inv))
-                                               (map :delta))
-                                             + 0 ok-adds)
-                            upper (transduce (clojure.core/comp
-                                               (filter #(< (:inv %) rc))
-                                               (map :delta))
-                                             + 0 maybe-adds)]
-                        (when-not (<= lower v upper)
-                          {:kind  (if (< v lower) :lost-update :double-count)
-                           :read  {:value v :final? final?}
-                           :lower lower
-                           :upper upper}))))
+                      (bounds-violation :read v inv (:comp r) nil
+                                        {:final? final?})))
               reads)
+        ;; Every :ok add's reported total is bounds-checked as an
+        ;; observation too (Job 09 second pass): the Q14 forensics
+        ;; needed exactly this — without final reads the read-only
+        ;; bounds are slack, but the totals pin the state at every
+        ;; single apply.
+        observed-violations
+        (into []
+              (keep (fn [{:keys [observed delta inv] :as a}]
+                      (when observed
+                        ;; The pre-state this add's total reveals
+                        ;; (observed − its own delta) is bounds-checked
+                        ;; like a read, with the add itself excluded
+                        ;; from its own bounds.
+                        (bounds-violation :observed-total (- observed delta)
+                                          inv (:comp a) inv
+                                          {:total observed :delta delta}))))
+              ok-adds)
         dup-observed
         (->> ok-adds
              (keep :observed)
@@ -656,7 +684,9 @@
                      {:kind :duplicate-observed-value
                       :observed total
                       :ok-adds-sharing-it n})))
-        violations (into read-violations dup-observed)
+        violations (-> read-violations
+                       (into observed-violations)
+                       (into dup-observed))
         final      (->> reads (filter :final?) last)]
     {:valid?     (empty? violations)
      :adds       {:ok (count ok-adds) :info (count info-adds)
