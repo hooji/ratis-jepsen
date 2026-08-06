@@ -56,15 +56,21 @@
     (is (= ["--id" "n3"
             "--peers" "n1=n1:6000,n2=n2:6000,n3=n3:6000,n4=n4:6000,n5=n5:6000"
             "--storage" "/var/lib/ratis-kv"]
-           (db/server-args "n3" nil))))
+           (db/server-args "n3" nil nil))))
   (testing "a seeded-bug run appends the flag (and only then)"
     (is (= ["--id" "n1"
             "--peers" "n1=n1:6000,n2=n2:6000,n3=n3:6000,n4=n4:6000,n5=n5:6000"
             "--storage" "/var/lib/ratis-kv"
             "--seed-bug" "stale-reads"]
-           (db/server-args "n1" "stale-reads"))))
+           (db/server-args "n1" "stale-reads" nil))))
+  (testing "the Q14 expiry override appends its flag (and only then)"
+    (is (= ["--id" "n2"
+            "--peers" "n1=n1:6000,n2=n2:6000,n3=n3:6000,n4=n4:6000,n5=n5:6000"
+            "--storage" "/var/lib/ratis-kv"
+            "--retry-cache-expiry-ms" "2000"]
+           (db/server-args "n2" nil 2000))))
   (testing "every voter gets the identical peers value"
-    (is (apply = (map #(nth (db/server-args % nil) 3) env/initial-voters)))))
+    (is (apply = (map #(nth (db/server-args % nil nil) 3) env/initial-voters)))))
 
 (deftest join-server-args-contract-cli
   (testing "join mode (Job 08): full 7-node address book + --join"
@@ -72,14 +78,21 @@
             "--peers" (db/peers-spec env/all-nodes)
             "--storage" "/var/lib/ratis-kv"
             "--join"]
-           (db/join-server-args "n6" nil))))
+           (db/join-server-args "n6" nil nil))))
   (testing "seed-bug still appends after --join"
     (is (= ["--id" "n7"
             "--peers" (db/peers-spec env/all-nodes)
             "--storage" "/var/lib/ratis-kv"
             "--join"
             "--seed-bug" "stale-reads"]
-           (db/join-server-args "n7" "stale-reads")))))
+           (db/join-server-args "n7" "stale-reads" nil))))
+  (testing "the Q14 expiry override rides join mode too"
+    (is (= ["--id" "n6"
+            "--peers" (db/peers-spec env/all-nodes)
+            "--storage" "/var/lib/ratis-kv"
+            "--join"
+            "--retry-cache-expiry-ms" "1500"]
+           (db/join-server-args "n6" nil 1500)))))
 
 (deftest dynamic-node-selection
   (let [test {:membership-state (atom {:voters #{"n1" "n2" "n3" "n4" "n5"}

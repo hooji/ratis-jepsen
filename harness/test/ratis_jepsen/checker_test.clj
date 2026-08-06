@@ -429,3 +429,191 @@
       (is (true? (:valid? v)))
       (is (= ["n6"] (:joined-with-installs v)))
       (is (= {"n6" 2, "n7" 0} (:receive-counts v))))))
+
+;; ---------------------------------------------------------------------------
+;; Counter checking (Job 09). Fabricated per-key histories: ops in the
+;; plain per-key shape the independent checker hands over (tuples already
+;; unwrapped). Processes invoke serially, like real workers.
+;; ---------------------------------------------------------------------------
+
+(defn- cop
+  "One client op for counter histories."
+  ([process type f value] (cop process type f value nil))
+  ([process type f value extra]
+   (merge {:process process, :type type, :f f, :value value} extra)))
+
+(deftest counter-exactly-once-clean-history-passes
+  ;; Two workers: three :ok adds (5+1+2=8), interleaved reads inside
+  ;; bounds, a final read of exactly 8.
+  (let [h [(cop 0 :invoke :add 5) (cop 0 :ok :add 5 {:observed 5})
+           (cop 1 :invoke :add 1) (cop 1 :ok :add 1 {:observed 6})
+           (cop 0 :invoke :read nil) (cop 0 :ok :read 6)
+           (cop 1 :invoke :add 2) (cop 1 :ok :add 2 {:observed 8})
+           (cop 0 :invoke :read nil {:final? true})
+           (cop 0 :ok :read 8)]
+        v (checker/check-counter-key h)]
+    (is (true? (:valid? v)))
+    (is (= {:ok 3 :info 0 :fail 0 :pending 0} (:adds v)))
+    (is (= 8 (:ok-sum v)))
+    (is (= 8 (get-in v [:final-read :v])))))
+
+(deftest counter-convicts-a-double-count
+  ;; The Q14 shape: two :ok adds (3+4=7), no :info slack, and a final
+  ;; read of 10 — one add counted twice. upper = 7 < 10 ⇒ conviction.
+  (let [h [(cop 0 :invoke :add 3) (cop 0 :ok :add 3)
+           (cop 0 :invoke :add 4) (cop 0 :ok :add 4)
+           (cop 0 :invoke :read nil {:final? true})
+           (cop 0 :ok :read 10)]
+        v (checker/check-counter-key h)]
+    (is (false? (:valid? v)))
+    (is (= :double-count (:kind (first (:violations v)))))
+    (is (= 7 (:upper (first (:violations v)))))))
+
+(deftest counter-convicts-a-lost-update
+  ;; An :ok add that never made it: final read below the :ok sum.
+  (let [h [(cop 0 :invoke :add 3) (cop 0 :ok :add 3)
+           (cop 0 :invoke :add 4) (cop 0 :ok :add 4)
+           (cop 0 :invoke :read nil {:final? true})
+           (cop 0 :ok :read 3)]
+        v (checker/check-counter-key h)]
+    (is (false? (:valid? v)))
+    (is (= :lost-update (:kind (first (:violations v)))))
+    (is (= 7 (:lower (first (:violations v)))))))
+
+(deftest counter-info-adds-count-zero-or-once
+  ;; One :ok add (5) and one :info add (2): a final read of 5 (info never
+  ;; applied) and one of 7 (info applied once) are BOTH legal; 9 (info
+  ;; applied twice) is not.
+  (let [base [(cop 0 :invoke :add 5) (cop 0 :ok :add 5)
+              (cop 1 :invoke :add 2) (cop 1 :info :add 2)]
+        with-final (fn [v] (conj (vec base)
+                                 (cop 0 :invoke :read nil {:final? true})
+                                 (cop 0 :ok :read v)))]
+    (is (true? (:valid? (checker/check-counter-key (with-final 5)))))
+    (is (true? (:valid? (checker/check-counter-key (with-final 7)))))
+    (let [v (checker/check-counter-key (with-final 9))]
+      (is (false? (:valid? v)))
+      (is (= :double-count (:kind (first (:violations v))))))))
+
+(deftest counter-fail-adds-are-definitely-excluded
+  ;; A :fail add tightens the upper bound (outcome-map guarantee:
+  ;; definitely not applied): ok 5 + fail 3 ⇒ a read of 8 convicts.
+  (let [h [(cop 0 :invoke :add 5) (cop 0 :ok :add 5)
+           (cop 1 :invoke :add 3) (cop 1 :fail :add 3)
+           (cop 0 :invoke :read nil {:final? true})
+           (cop 0 :ok :read 8)]
+        v (checker/check-counter-key h)]
+    (is (false? (:valid? v)))
+    (is (= :double-count (:kind (first (:violations v)))))))
+
+(deftest counter-pending-adds-count-zero-or-once
+  ;; A worker crashed mid-add (invocation, no completion): like :info,
+  ;; 0-or-1.
+  (let [h [(cop 0 :invoke :add 5) (cop 0 :ok :add 5)
+           (cop 1 :invoke :add 2)   ; never completes
+           (cop 0 :invoke :read nil {:final? true})
+           (cop 0 :ok :read 7)]
+        v (checker/check-counter-key h)]
+    (is (true? (:valid? v)))
+    (is (= 1 (get-in v [:adds :pending])))))
+
+(deftest counter-mid-run-read-bounds
+  ;; A read invoked BEFORE an add completes may or may not include it
+  ;; (upper counts adds invoked before the read completed), but a read
+  ;; invoked AFTER an :ok add completes must include it (lower).
+  (let [ok  [(cop 0 :invoke :add 4) (cop 0 :ok :add 4)
+             (cop 1 :invoke :read nil) (cop 1 :ok :read 4)]
+        bad [(cop 0 :invoke :add 4) (cop 0 :ok :add 4)
+             (cop 1 :invoke :read nil) (cop 1 :ok :read 0)]]
+    (is (true? (:valid? (checker/check-counter-key ok))))
+    (let [v (checker/check-counter-key bad)]
+      (is (false? (:valid? v)))
+      (is (= :lost-update (:kind (first (:violations v))))))))
+
+(deftest counter-duplicate-observed-totals-convict
+  ;; Two :ok adds reporting the SAME post-apply total: with adds-only
+  ;; keys and positive deltas each apply's total is unique, so a shared
+  ;; total means the reply cache handed one op another op's reply — the
+  ;; repliedIndex-linearizability signal. (Bounds alone can't see this.)
+  (let [h [(cop 0 :invoke :add 1) (cop 0 :ok :add 1 {:observed 3})
+           (cop 1 :invoke :add 2) (cop 1 :ok :add 2 {:observed 3})
+           (cop 0 :invoke :read nil {:final? true})
+           (cop 0 :ok :read 3)]
+        v (checker/check-counter-key h)]
+    (is (false? (:valid? v)))
+    (is (some #(= :duplicate-observed-value (:kind %)) (:violations v)))))
+
+;; ---------------------------------------------------------------------------
+;; Retry evidence (Job 09)
+;; ---------------------------------------------------------------------------
+
+(deftest retry-totals-counting
+  (let [h [{:process 0 :type :invoke :f :add :value 1}
+           {:process 0 :type :ok :f :add :value 1 :retries 3}
+           {:process 1 :type :invoke :f :read :value nil}
+           {:process 1 :type :fail :f :read :value nil :retries 2}
+           {:process :nemesis :type :info :f :crash :retries 9} ; not a client op
+           {:process 2 :type :invoke :f :add :value 1}
+           {:process 2 :type :ok :f :add :value 1}]]
+    (is (= {:total 5 :ops 2 :by-f {:add 3 :read 2}}
+           (checker/retry-totals h)))))
+
+(deftest retry-verdict-decision
+  (testing "required and retries happened: valid, counts reported"
+    (let [v (checker/retry-verdict true {:total 41 :ops 12 :by-f {:add 30 :read 11}})]
+      (is (true? (:valid? v)))
+      (is (= 41 (:total v)))))
+  (testing "required and ZERO retries: the distinct dedup-law failure"
+    (let [v (checker/retry-verdict true {:total 0 :ops 0 :by-f {}})]
+      (is (false? (:valid? v)))
+      (is (= :no-retry-evidence (:error v)))))
+  (testing "not required (calm run): valid with a note"
+    (let [v (checker/retry-verdict false {:total 0 :ops 0 :by-f {}})]
+      (is (true? (:valid? v)))
+      (is (some? (:note v))))))
+
+(deftest counter-absent-reads-count-as-zero
+  ;; GET of an untouched counter replies ABSENT (:value nil): that is a
+  ;; legal read of 0 before any add lands (found live — the first reads
+  ;; of a key race its first add), and a LYING absent after an :ok add
+  ;; is a lost update.
+  (testing "an early absent read is a read of 0"
+    (let [h [(cop 0 :invoke :read nil) (cop 0 :ok :read nil)
+             (cop 1 :invoke :add 5) (cop 1 :ok :add 5)
+             (cop 0 :invoke :read nil {:final? true})
+             (cop 0 :ok :read 5)]]
+      (is (true? (:valid? (checker/check-counter-key h))))))
+  (testing "absent AFTER an :ok add convicts as a lost update"
+    (let [h [(cop 1 :invoke :add 5) (cop 1 :ok :add 5)
+             (cop 0 :invoke :read nil {:final? true})
+             (cop 0 :ok :read nil)]
+          v (checker/check-counter-key h)]
+      (is (false? (:valid? v)))
+      (is (= :lost-update (:kind (first (:violations v))))))))
+
+(deftest counter-observed-totals-are-bounds-checked
+  ;; Job 09 second pass: an :ok add's reported total pins the state at
+  ;; its apply — a double-apply is visible in the TOTALS even when no
+  ;; read lands nearby (the Q14 forensic, automated). Here: two
+  ;; sequential adds of 3 and 4; the second reports total 10, i.e. a
+  ;; pre-state of 6 > the only possible pre-state 3 — the first add
+  ;; applied twice.
+  (testing "an impossible pre-state convicts without any read"
+    (let [h [(cop 0 :invoke :add 3) (cop 0 :ok :add 3 {:observed 3})
+             (cop 0 :invoke :add 4) (cop 0 :ok :add 4 {:observed 10})]
+          v (checker/check-counter-key h)]
+      (is (false? (:valid? v)))
+      (is (= :double-count (:kind (first (:violations v)))))))
+  (testing "consistent totals pass"
+    (let [h [(cop 0 :invoke :add 3) (cop 0 :ok :add 3 {:observed 3})
+             (cop 0 :invoke :add 4) (cop 0 :ok :add 4 {:observed 7})]]
+      (is (true? (:valid? (checker/check-counter-key h))))))
+  (testing "a dedup'd retry's CACHED total stays legal despite the late
+            completion (upper widens with completion, lower pins to
+            invocation)"
+    ;; op A applies first (total 2) but completes LAST (cached reply
+    ;; delivered on a retry); op B applies second (total 5).
+    (let [h [(cop 0 :invoke :add 2)
+             (cop 1 :invoke :add 3) (cop 1 :ok :add 3 {:observed 5})
+             (cop 0 :ok :add 2 {:observed 2})]]
+      (is (true? (:valid? (checker/check-counter-key h)))))))

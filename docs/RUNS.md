@@ -332,3 +332,87 @@ came from RECOVER restarts in later cycles, and "the retry storm" was
 the leader hammering a division its own install had killed. Fixed in
 Job 08 (`KvStateMachine` lifecycle discipline); the combined M2 gates
 below ran on the fixed SUT with joiners serving reads after install.
+
+## 2026-08-06 — M3 gates: the exactly-once counter workload (Job 09)
+
+- **Commands**: `env/run.sh test --workload counter --nemesis <kind>
+  --time-limit 300` (counter runs carry the sustained-stream defaults:
+  rate 1.4, 800 ops/key); register regression:
+  `env/run.sh test --nemesis crash --time-limit 300 --seed-bug stale-reads`
+- **Versions**: ratis 3.2.2, jepsen 0.3.13, SUT `ratis-kv
+  0.1.0-SNAPSHOT` (+ ADD + the expiry flag), JDK 21. All quoted gates
+  ran on the final checker (per-key bounds + observed-total pinning).
+
+| Run | Exit | Wall | Analysis | ok / fail / info | Retries (ops) | Store (`20260806T…`) |
+|---|---|---|---|---|---|---|
+| counter+crash #1 | 0 | 313 s | 1.5 s | 2095 / 1 / 45 | **286** (109) | `…counter-crash/114845.009Z` |
+| counter+crash #2 | 0 | 319 s | 1.4 s | 2043 / 2 / 30 | **197** (71) | `…counter-crash/115408.681Z` |
+| counter+mixed-all | 0 | 315 s | 1.7 s | 2098 / 1 / 6 | **122** (86) | `…counter-mixed-all/115934.890Z` |
+| **Q14 red-by-design** | **1** | 313 s | 1.6 s | 1895 / 0 / 0 | **304** (120) | `…counter-quorum-pause/114319.903Z` |
+| register + seed-bug (regression) | **1** | 315 s | ~1 s | — | — | `…register-crash-seedbug-stale-reads/111830.517Z` |
+
+**The retry-cache-across-failover proof** (crash = leader-biased kill
+cycles): both crash gates and the mixed-all gate held exactly-once on
+every key — each `:ok` add counted exactly once (the checker
+additionally pins the state at every single apply through the totals
+`ADD` reports), each `:info` add 0-or-1 — while the client demonstrably
+retried through the failovers: `:retry-evidence {:total 286, :ops 109,
+:by-f {:add 257, :read 29}}` in crash #1, with the server retry cache
+at its default 60 s window. `:info` sanity: the shakedown measured
+70-of-71 write `:info`s inside kill windows; the gates' 45/30/6 follow
+the same shape. Earlier same-day greens on the pre-strengthening
+checker (`…counter-crash/105620.646Z`, `…110141.522Z`,
+`…counter-mixed-all/110702.478Z`) are retained as history.
+
+**Q14 (PLAN Q14 — the L3 Indeterminate-rule calibration), convicted on
+all five keys.** Exact configs: `--workload counter --nemesis
+quorum-pause --retry-cache-expiry-ms 500 --retry-delay-ms 5000 --rate 3
+--ops-per-key 1200 --time-limit 300` — the server retry-cache window
+shrunk to 500 ms (the flag's own contract says to keep it LONGER than
+the client's total retry span; Q14 violates it on purpose) and the
+client's inter-attempt delay raised to 5 s so retries overshoot it.
+Verdict: `:valid? false` on **all five keys**, every violation
+`:double-count`; the first, verbatim —
+
+```
+{:kind :double-count, :read {:final? false, :value 126}, :lower 121, :upper 121}
+```
+
+— a linearizable read of 126 where every exactly-once serialization
+puts the counter at exactly 121 (the run has ZERO `:info` ops: no
+0-or-1 slack, so every excess unit is a proven double-apply). Forensic
+excess per key (max observed total − `:ok` sum, `:info` sum 0): +46,
++49, +40, +42, +49 — ≈226 double-applied delta mass in one 300 s run —
+while the cluster acknowledged 1895 of 1895 ops as clean successes.
+This is the silent over-count the L3 provider's Indeterminate-retry
+rule exists to prevent: its calibration is now empirical, not
+documentary.
+
+**Getting the double required finding the right fault — three attempts,
+all preserved:**
+
+1. `--nemesis crash`, expiry 2000 ms / delay 3000 ms
+   (`…counter-crash/111221.680Z`): green — every retry deduplicated.
+2. `--nemesis crash`, expiry 500 ms / delay 5000 ms
+   (`…counter-crash/112532.723Z`): green again; forensics showed max
+   observed = `:ok` sum exactly on every key. Kill -9 cannot produce
+   the needed applied-but-reply-lost population: append → replicate →
+   commit → reply spans ~2 ms, so a killed leader takes its unreplied
+   appends' replies down with the process only for the ops inside that
+   sliver (~0.1 in flight at any instant).
+3. `--nemesis pause` (minority SIGSTOP, expiry 500 / delay 5000,
+   `…counter-pause/113333.439Z`): green — a paused LEADER is deposed
+   ~2 s into the freeze and its unread requests never appended; only
+   44 retries in the whole run.
+4. The producer that works: **`--nemesis quorum-pause`** (new kind,
+   Q14 lever) — SIGSTOP every follower, leave the leader alive: it
+   keeps APPENDING client adds but cannot commit them, so every add in
+   the stall window times out client-side (reply loss with surviving
+   application, en masse), commits at resume, and its 5 s-delayed
+   same-callId retry meets an expired cache entry and is appended
+   AGAIN — `applyLogToStateMachine` at 3.2.2 applies every
+   STATEMACHINELOGENTRY unconditionally (no apply-time dedup), so both
+   copies apply. The negative results are calibration gold in their
+   own right: **the documented expiry hazard is timeout-shaped, not
+   crash-shaped** — process death at LAN latencies cannot reach it,
+   sustained ambiguity (quorum loss, freezes, slow disks) can.

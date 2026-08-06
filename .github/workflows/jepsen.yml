@@ -31,11 +31,13 @@ on:
     inputs:
       scenarios:
         description: >-
-          Comma-separated nemesis scenarios, one matrix runner each
-          (valid values = the harness's --nemesis kinds)
+          Comma-separated scenarios, one matrix runner each. A bare token
+          is a --nemesis kind on the register workload; a counter-<kind>
+          token (Job 09) runs the M3 counter workload under that nemesis
+          (e.g. counter-crash).
         type: string
         required: false
-        default: none,partition,crash,pause,mixed,snapshot-churn,transfer,membership,membership-snapshot-churn,mixed-all
+        default: none,partition,crash,pause,mixed,snapshot-churn,transfer,membership,membership-snapshot-churn,mixed-all,counter-crash
       time-limit:
         description: Workload seconds per scenario run (harness --time-limit)
         type: string
@@ -130,12 +132,21 @@ jobs:
       - name: Bring the topology up
         run: env/run.sh up
       # The harness exit code is the verdict (0 = checker valid) and,
-      # uncaught, becomes the step's.
-      - name: Run the harness (nemesis ${{ matrix.scenario }})
+      # uncaught, becomes the step's. counter-<kind> tokens (Job 09)
+      # translate to the M3 counter workload under that nemesis; bare
+      # tokens keep the register workload, unchanged.
+      - name: Run the harness (scenario ${{ matrix.scenario }})
         env:
           SCENARIO: ${{ matrix.scenario }}
           TIME_LIMIT: ${{ needs.build-sut.outputs.time-limit }}
-        run: env/run.sh test --nemesis "${SCENARIO}" --time-limit "${TIME_LIMIT}"
+        run: |
+          case "${SCENARIO}" in
+            counter-*)
+              env/run.sh test --workload counter \
+                --nemesis "${SCENARIO#counter-}" --time-limit "${TIME_LIMIT}" ;;
+            *)
+              env/run.sh test --nemesis "${SCENARIO}" --time-limit "${TIME_LIMIT}" ;;
+          esac
       # store/ is written by root inside the container; tar as root rather
       # than fight ownership on the runner.
       - name: Compress the store

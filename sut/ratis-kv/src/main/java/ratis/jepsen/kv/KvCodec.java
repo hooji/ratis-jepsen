@@ -26,6 +26,8 @@ import java.util.regex.Pattern;
  * <pre>
  *   PUT &lt;k&gt; &lt;v&gt;             write path
  *   CAS &lt;k&gt; &lt;expect&gt; &lt;update&gt;  write path
+ *   ADD &lt;k&gt; &lt;delta&gt;         write path (M3; absent key counts as 0,
+ *                           replies VAL &lt;new&gt;)
  *   GET &lt;k&gt;                 read path
  * </pre>
  *
@@ -62,6 +64,10 @@ public final class KvCodec {
 
     /** {@code CAS <key> <expect> <update>} — compare-and-set. */
     record Cas(String key, long expect, long update) implements Request {
+    }
+
+    /** {@code ADD <key> <delta>} — increment; absent key counts as 0 (M3). */
+    record Add(String key, long delta) implements Request {
     }
 
     /** {@code GET <key>} — read. */
@@ -142,6 +148,19 @@ public final class KvCodec {
         }
         return new Request.Cas(tokens[1], expect, update);
       }
+      case "ADD": {
+        if (tokens.length != 3) {
+          return new Request.Malformed("ADD expects 2 arguments, got " + (tokens.length - 1));
+        }
+        if (!isKey(tokens[1])) {
+          return new Request.Malformed("invalid key: " + tokens[1]);
+        }
+        final Long delta = parseLong(tokens[2]);
+        if (delta == null) {
+          return new Request.Malformed("invalid long delta: " + tokens[2]);
+        }
+        return new Request.Add(tokens[1], delta);
+      }
       case "GET": {
         if (tokens.length != 2) {
           return new Request.Malformed("GET expects 1 argument, got " + (tokens.length - 1));
@@ -164,6 +183,7 @@ public final class KvCodec {
     return switch (request) {
       case Request.Put p -> "PUT " + p.key() + " " + p.value();
       case Request.Cas c -> "CAS " + c.key() + " " + c.expect() + " " + c.update();
+      case Request.Add a -> "ADD " + a.key() + " " + a.delta();
       case Request.Get g -> "GET " + g.key();
       case Request.Malformed m ->
           throw new IllegalArgumentException("malformed request has no wire form: " + m.reason());

@@ -145,3 +145,50 @@
       (is (= peers (client/follower-candidates peers "n9"))))
     (testing "degenerate single-peer group: never empty"
       (is (= ["n1"] (client/follower-candidates ["n1"] "n1"))))))
+
+;; ---------------------------------------------------------------------------
+;; The counter workload's client surface (Job 09)
+;; ---------------------------------------------------------------------------
+
+(deftest add-op-wire-mapping
+  (testing ":add maps onto ADD <k> <delta>"
+    (is (= "ADD 3 5"
+           (client/op->request {:f :add :value (independent/tuple 3 5)})))
+    (is (= "ADD ctr -2"
+           (client/op->request {:f :add :value (independent/tuple "ctr" -2)})))))
+
+(deftest add-verdict-merging
+  (testing "an :ok add keeps its DELTA in :value; the reported post-apply
+            total rides :observed"
+    (let [op  {:type :invoke :f :add :value (independent/tuple "k" 5)}
+          op' (client/verdict->op op {:type :ok :observed 12})]
+      (is (= :ok (:type op')))
+      (is (identical? (:value op) (:value op')))
+      (is (= 12 (:observed op'))))))
+
+(deftest invoke-deadline-derivation
+  (testing "the stock 200 ms delay keeps the M0-established 5 s deadline"
+    (is (= client/invoke-timeout-ms (client/invoke-deadline-ms 200))))
+  (testing "a Q14 delay widens the deadline to cover every attempt's rpc
+            timeout plus every sleep — the LIBRARY must exhaust first"
+    (is (= (+ 1000 (* 4 (+ 3000 3000)))
+           (client/invoke-deadline-ms 3000)))
+    (is (< (* 4 3000) (client/invoke-deadline-ms 3000)))))
+
+(deftest counting-retry-policy-counts
+  (let [counter (atom 0)
+        policy  (client/counting-retry-policy 4 1 counter)
+        event   (fn [n]
+                  (reify org.apache.ratis.retry.RetryPolicy$Event
+                    (getAttemptCount [_] n)))]
+    (testing "each observed failure bumps the counter and the inner
+              policy's decision passes through unchanged"
+      (let [a1 (.handleAttemptFailure policy (event 1))
+            a2 (.handleAttemptFailure policy (event 2))]
+        (is (= 2 @counter))
+        (is (true? (.shouldRetry a1)))
+        (is (true? (.shouldRetry a2)))))
+    (testing "exhaustion is still counted and still refuses"
+      (let [a (.handleAttemptFailure policy (event 9))]
+        (is (= 3 @counter))
+        (is (false? (.shouldRetry a)))))))

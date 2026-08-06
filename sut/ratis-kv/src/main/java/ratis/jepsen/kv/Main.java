@@ -175,6 +175,14 @@ public final class Main {
     RaftServerConfigKeys.Snapshot.setAutoTriggerEnabled(properties, true);
     RaftServerConfigKeys.Snapshot.setAutoTriggerThreshold(properties, 4096);
     RaftServerConfigKeys.Log.setPurgeUptoSnapshotIndex(properties, true);
+    if (options.retryCacheExpiryMs() != null) {
+      // M3/Q14 test lever ONLY — never part of the production profile: the
+      // key's own contract ("set expiry time longer than total client retry
+      // to guarantee exactly-once semantic", RaftServerConfigKeys.RetryCache
+      // at 3.2.2) is exactly what the expiry-window run violates on purpose.
+      RaftServerConfigKeys.RetryCache.setExpiryTime(properties,
+          TimeDuration.valueOf(options.retryCacheExpiryMs(), TimeUnit.MILLISECONDS));
+    }
     GrpcConfigKeys.Server.setPort(properties, options.selfPort());
     return properties;
   }
@@ -182,7 +190,8 @@ public final class Main {
   static String usage() {
     return """
         Usage: ratis-kv --id <id> --peers <id=host:port>[,<id=host:port>...] \\
-                        --storage <dir> [--join] [--seed-bug stale-reads] [--help]
+                        --storage <dir> [--join] [--retry-cache-expiry-ms <ms>] \\
+                        [--seed-bug stale-reads] [--help]
 
           --id       this node's id; must appear in --peers
           --peers    the full fixed voter set, identical on every node
@@ -194,6 +203,11 @@ public final class Main {
                      committed into the conf by setConfiguration (existing
                      storage, if any, is recovered instead) — the M2
                      membership-pool mode
+          --retry-cache-expiry-ms
+                     override raft.server.retrycache.expirytime (absent:
+                     Ratis default 60 s). M3/Q14 test lever only — shrinking
+                     it below the client's total retry span deliberately
+                     re-arms the documented retry double-apply boundary
           --seed-bug activate a deliberately seeded bug (testing the test
                      harness only; never use in a run you care about):
                        stale-reads  linearizable reads observe ~500 ms stale state
