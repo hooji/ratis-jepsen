@@ -332,3 +332,33 @@ came from RECOVER restarts in later cycles, and "the retry storm" was
 the leader hammering a division its own install had killed. Fixed in
 Job 08 (`KvStateMachine` lifecycle discipline); the combined M2 gates
 below ran on the fixed SUT with joiners serving reads after install.
+
+## 2026-08-06 — M3 gates: the exactly-once counter workload (Job 09)
+
+- **Commands**: `env/run.sh test --workload counter --nemesis <kind>
+  --time-limit 300` (counter runs carry the sustained-stream defaults:
+  rate 1.4, 800 ops/key); register regression:
+  `env/run.sh test --nemesis crash --time-limit 300 --seed-bug stale-reads`
+- **Versions**: ratis 3.2.2, jepsen 0.3.13, SUT `ratis-kv
+  0.1.0-SNAPSHOT` (+ ADD + the expiry flag), JDK 21
+
+| Run | Exit | Wall | Analysis | ok / fail / info | Retries (ops) | Store (`20260806T…`) |
+|---|---|---|---|---|---|---|
+| counter+crash #1 | 0 | 315 s | 1.4 s | 2075 / 3 / 37 | **265** (106) | `…counter-crash/105620.646Z` |
+| counter+crash #2 | 0 | 314 s | 1.4 s | 2037 / 0 / 28 | **203** (84) | `…counter-crash/110141.522Z` |
+| counter+mixed-all | 0 | 312 s | 1.6 s | 1680 / 361 / 22 | **184** (81) | `…counter-mixed-all/110702.478Z` |
+| register + seed-bug (regression) | **1** | 315 s | ~1 s | — | — | `…register-crash-seedbug-stale-reads/111830.517Z` |
+
+**The retry-cache-across-failover proof** (crash = leader-biased kill
+cycles): every green run's per-key counter checker held — each `:ok`
+add counted exactly once, each `:info` add 0-or-1 times, no duplicate
+`:observed` totals — while the client demonstrably retried through the
+failovers: 265 and 203 retry-policy consultations across 106/84
+invocations in the two crash gates (`:retry-evidence {:total 265, :ops
+106, :by-f {:add 213, :read 52}}`), all with the server retry cache at
+its default 60 s window. `:info` sanity: crash #1's 37 all rode kill
+windows (the first shakedown measured 70-of-71 inside windows);
+mixed-all's 361 fails are the usual partition-window read fails plus
+definite write rejections.
+
+TBD-Q14-LEDGER
