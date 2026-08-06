@@ -288,7 +288,7 @@ constrain everything downstream and should be settled first.
 
 ## 7. Immediate next steps
 
-*(updated 2026-08-06: **M2 complete** — job 07 (snapshot churn,
+*(updated 2026-08-06 (later): **M3 complete** — job 09 merged: exactly-once held under leader-kill churn at the default window; Q14 boundary demonstrated red only past it (quorum-pause nemesis; hazard is timeout-shaped, pre-step-down slice). **M4 gate underway**: job 10 FUSE spike. Earlier: **M2 complete** — job 07 (snapshot churn,
 transfer, follower reads) and job 08 (membership churn, `--join`,
 the `pause()` conviction + fix) merged; three upstream-report
 candidates banked in BACKLOG 7–9; RUNS carries the Job-07
