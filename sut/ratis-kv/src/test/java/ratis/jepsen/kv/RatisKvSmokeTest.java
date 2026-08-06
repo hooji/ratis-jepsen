@@ -51,6 +51,15 @@ class RatisKvSmokeTest {
         assertEquals("MISMATCH 2", send(client, "CAS k 1 3"));
         assertEquals("ABSENT", send(client, "CAS absent 1 2"));
 
+        // (b2) ADD semantics (M3): absent key counts as 0; replies carry the
+        // value after THIS apply; deltas may be negative.
+        assertEquals("VAL 5", send(client, "ADD ctr 5"));
+        assertEquals("VAL 7", send(client, "ADD ctr 2"));
+        assertEquals("VAL 4", send(client, "ADD ctr -3"));
+        assertEquals("VAL 4", sendReadOnly(client, "GET ctr"));
+        assertEquals("ERR ADD expects 2 arguments, got 1", send(client, "ADD ctr"));
+        assertEquals("ERR write command ADD sent via read path", sendReadOnly(client, "ADD ctr 1"));
+
         // Malformed input over the real wire replies ERR, on both paths,
         // instead of throwing raw exceptions back at the client.
         assertEquals("ERR PUT expects 2 arguments, got 1", send(client, "PUT k"));

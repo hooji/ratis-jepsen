@@ -27,7 +27,7 @@ import java.util.Map;
  *
  * <pre>
  * --id n1 --peers n1=host1:6000,n2=host2:6000,... --storage /var/lib/ratis-kv
- *         [--join] [--seed-bug stale-reads]
+ *         [--join] [--retry-cache-expiry-ms &lt;ms&gt;] [--seed-bug stale-reads]
  * </pre>
  *
  * @param id      this node's id; must appear in {@code peers}
@@ -39,10 +39,17 @@ import java.util.Map;
  *                hosts nothing until bootstrapped via
  *                {@code GroupManagementApi.add} (existing storage, if any,
  *                is recovered instead)
+ * @param retryCacheExpiryMs override for the server retry-cache expiry
+ *                (raft.server.retrycache.expirytime), or null to leave the
+ *                Ratis default (60 s) untouched. Test lever for the M3/Q14
+ *                expiry-window runs ONLY: shrinking it below the client's
+ *                total retry span deliberately re-arms the documented
+ *                double-apply boundary
  * @param seedBug the seeded bug to activate, or null for a correct server
  */
 public record ServerOptions(
-    String id, Map<String, String> peers, Path storageDir, boolean join, SeedBug seedBug) {
+    String id, Map<String, String> peers, Path storageDir, boolean join,
+    Long retryCacheExpiryMs, SeedBug seedBug) {
 
   /** Signals a CLI parsing/validation failure; the message is user-facing. */
   public static final class UsageException extends Exception {
@@ -75,6 +82,7 @@ public record ServerOptions(
     String peersSpec = null;
     String storageSpec = null;
     boolean join = false;
+    String retryCacheExpirySpec = null;
     String seedBugSpec = null;
 
     for (int i = 0; i < args.length; i++) {
@@ -84,6 +92,7 @@ public record ServerOptions(
         case "--peers" -> peersSpec = flagValue(args, ++i, flag);
         case "--storage" -> storageSpec = flagValue(args, ++i, flag);
         case "--join" -> join = true;
+        case "--retry-cache-expiry-ms" -> retryCacheExpirySpec = flagValue(args, ++i, flag);
         case "--seed-bug" -> seedBugSpec = flagValue(args, ++i, flag);
         default -> throw new UsageException("unknown argument: " + flag);
       }
@@ -111,6 +120,18 @@ public record ServerOptions(
       throw new UsageException("invalid --storage path: " + storageSpec);
     }
 
+    Long retryCacheExpiryMs = null;
+    if (retryCacheExpirySpec != null) {
+      try {
+        retryCacheExpiryMs = Long.parseLong(retryCacheExpirySpec);
+      } catch (NumberFormatException e) {
+        throw new UsageException("invalid --retry-cache-expiry-ms value: " + retryCacheExpirySpec);
+      }
+      if (retryCacheExpiryMs <= 0) {
+        throw new UsageException("--retry-cache-expiry-ms must be positive: " + retryCacheExpirySpec);
+      }
+    }
+
     SeedBug seedBug = null;
     if (seedBugSpec != null) {
       seedBug = SeedBug.fromCliName(seedBugSpec);
@@ -120,7 +141,7 @@ public record ServerOptions(
       }
     }
 
-    return new ServerOptions(id, peers, storageDir, join, seedBug);
+    return new ServerOptions(id, peers, storageDir, join, retryCacheExpiryMs, seedBug);
   }
 
   private static String flagValue(String[] args, int index, String flag) throws UsageException {

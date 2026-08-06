@@ -46,7 +46,7 @@
                                       RaftGroupId RaftPeer RaftPeerId
                                       SetConfigurationRequest$Arguments
                                       SetConfigurationRequest$Mode)
-           (org.apache.ratis.retry RetryPolicies)
+           (org.apache.ratis.retry RetryPolicies RetryPolicy)
            (org.apache.ratis.util TimeDuration)))
 
 (def invoke-timeout-ms
@@ -70,6 +70,7 @@
       :write (str "PUT " k " " v)
       :cas   (let [[old new] v]
                (str "CAS " k " " old " " new))
+      :add   (str "ADD " k " " v)
       (throw (IllegalArgumentException.
                (str "unknown op :f " (pr-str f) " in " (pr-str op)))))))
 
@@ -91,6 +92,13 @@
                 op')
         op'   (if (contains? verdict :current)
                 (assoc op' :current (:current verdict))
+                op')
+        ;; ADD replies VAL <total-after-apply>; the op keeps its DELTA in
+        ;; :value (what the counter checker sums) and the reported total
+        ;; rides :observed (a deduplicated retry reports the CACHED
+        ;; original total — the repliedIndex signal).
+        op'   (if (contains? verdict :observed)
+                (assoc op' :observed (:observed verdict))
                 op')]
     (if (and (= :read (:f op)) (= :ok (:type verdict)))
       (assoc op' :value (independent/tuple k (:value verdict)))
@@ -180,6 +188,51 @@
                                                TimeUnit/MILLISECONDS)))
       (.build)))
 
+(defn counting-retry-policy
+  "The standard bounded fixed-sleep policy, with an observer: every
+  handleAttemptFailure call — one per FAILED attempt the policy is asked
+  about — bumps `counter`. This is the M3 retry-evidence source: the
+  library's internal same-callId retries are otherwise invisible to the
+  history, and a dedup run that never retried tested nothing. `sleep-ms`
+  is the client-side delay between attempts (--retry-delay-ms; the Q14
+  expiry run sets it above the shrunken server retry-cache window so the
+  retry arrives after the entry expired)."
+  ^RetryPolicy [attempts sleep-ms counter]
+  (let [^RetryPolicy inner (RetryPolicies/retryUpToMaximumCountWithFixedSleep
+                             (int attempts)
+                             (TimeDuration/valueOf (long sleep-ms)
+                                                   TimeUnit/MILLISECONDS))]
+    (reify RetryPolicy
+      (handleAttemptFailure [_ event]
+        (swap! counter inc)
+        (.handleAttemptFailure inner event)))))
+
+(defn invoke-deadline-ms
+  "The harness-side invocation deadline for a given inter-attempt delay:
+  the M0-established 5 s when the delay is the stock 200 ms, else derived
+  to cover every attempt (3 s library rpc timeout each) plus every sleep
+  plus 1 s slack — a Q14 run's deliberate 4×(3 s + delay) span must hit
+  the LIBRARY's exhaustion (surfacing the true outcome), not the harness
+  axe."
+  [retry-delay-ms]
+  (if (= retry-delay-ms retry-sleep-ms)
+    invoke-timeout-ms
+    (+ 1000 (* retry-attempts (+ 3000 (long retry-delay-ms))))))
+
+(defn open-counting-client
+  "open-raft-client with the counting policy: returns
+  {:client c, :retry-counter atom}. Worker clients use this; admin/probe
+  clients keep the plain constructors."
+  [id->address retry-delay-ms]
+  (let [counter (atom 0)]
+    {:client (-> (RaftClient/newBuilder)
+                 (.setProperties (RaftProperties.))
+                 (.setRaftGroup (raft-group id->address))
+                 (.setRetryPolicy (counting-retry-policy
+                                    retry-attempts retry-delay-ms counter))
+                 (.build))
+     :retry-counter counter}))
+
 (defn- send-request
   "Sends one wire request through the client on the op's path and returns
   the decoded reply string. A non-nil read-target sends the read
@@ -200,14 +253,14 @@
   "Runs one invocation under the harness-side deadline. Returns the reply
   string, or throws: the raw failure (unwrapped by the outcome map), or
   java.util.concurrent.TimeoutException when the deadline fires first."
-  [^RaftClient client {:keys [f] :as op} read-target]
+  [^RaftClient client {:keys [f] :as op} read-target deadline-ms]
   (let [request (op->request op)
         fut     (future (send-request client f request read-target))
-        result  (deref fut invoke-timeout-ms ::timed-out)]
+        result  (deref fut (long deadline-ms) ::timed-out)]
     (if (= result ::timed-out)
       (do (future-cancel fut)
           (throw (TimeoutException.
-                   (str "harness-side timeout after " invoke-timeout-ms
+                   (str "harness-side timeout after " deadline-ms
                         " ms: " request))))
       result)))
 
@@ -359,7 +412,8 @@
 ;; Jepsen client
 ;; ---------------------------------------------------------------------------
 
-(defrecord RatisKvClient [group-spec raft-client reads-mode peers]
+(defrecord RatisKvClient [group-spec raft-client reads-mode peers
+                          retry-counter deadline-ms]
   jc/Client
   (open! [this test _node]
     ;; One RaftClient per Jepsen process; the group is fixed, so every
@@ -376,22 +430,33 @@
     ;; NotLeaderException reply carries the group's current peer list
     ;; and the 3.2.2 client swaps it in (RaftClientImpl.refreshPeers),
     ;; so workers follow the conf as it churns.
-    (let [spec (if-let [state (:membership-state test)]
-                 (node-addresses (sort (:voters @state)))
-                 group-spec)]
+    (let [spec  (if-let [state (:membership-state test)]
+                  (node-addresses (sort (:voters @state)))
+                  group-spec)
+          delay (long (or (:retry-delay-ms test) retry-sleep-ms))
+          {:keys [client retry-counter]} (open-counting-client spec delay)]
       (assoc this
-             :raft-client (open-raft-client spec)
-             :reads-mode  (keyword (or (:reads test) "leader"))
-             :peers       (vec (keys spec)))))
+             :raft-client   client
+             :reads-mode    (keyword (or (:reads test) "leader"))
+             :peers         (vec (keys spec))
+             :retry-counter retry-counter
+             :deadline-ms   (invoke-deadline-ms delay))))
 
   (setup! [_this _test])
 
   (invoke! [_this _test op]
+    ;; One client per process and processes invoke serially, so the
+    ;; counter delta across this invocation is exactly its own retry
+    ;; activity (failed attempts the policy observed) — recorded on the
+    ;; completion as :retries, the M3 dedup-evidence source.
     (let [target  (when (= :read (:f op))
                     (pick-read-target raft-client peers reads-mode))
           op      (cond-> op target (assoc :read-via target))
-          outcome (try (invoke-raw raft-client op target)
-                       (catch Throwable t t))]
+          before  (long @retry-counter)
+          outcome (try (invoke-raw raft-client op target deadline-ms)
+                       (catch Throwable t t))
+          retries (- (long @retry-counter) before)
+          op      (cond-> op (pos? retries) (assoc :retries retries))]
       (verdict->op op (outcome/classify! (:f op) outcome))))
 
   (teardown! [_this _test])

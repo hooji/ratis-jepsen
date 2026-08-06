@@ -30,7 +30,10 @@
     have applied) and :fail for reads, plus a loud log for triage.
 
   The DESIGN 2.4 table, as implemented (op-kinds: :write = PUT, :cas = CAS,
-  :read = GET; \"write\" rows apply to both :write and :cas):
+  :add = ADD (M3), :read = GET; \"write\" rows apply to :write, :cas
+  and :add — ADD is deliberately non-idempotent, which is why its
+  ambiguity discipline matters most: an :info ADD is the 0-or-1 case
+  the counter checker reasons about):
 
   | Outcome from client                        | write/cas       | read  |
   |--------------------------------------------|-----------------|-------|
@@ -115,16 +118,16 @@
              TimeoutIOException)))
 
 (def op-kinds
-  "The three operation kinds. :write is PUT, :cas is CAS (both write-path);
-  :read is GET (read-path)."
-  #{:write :cas :read})
+  "The operation kinds. :write is PUT, :cas is CAS, :add is ADD (M3) —
+  all write-path; :read is GET (read-path)."
+  #{:write :cas :add :read})
 
 (defn write-kind?
-  "PUT and CAS are write-path operations: they may have applied even when
-  the invocation errors, so ambiguity must surface as :info."
+  "PUT, CAS and ADD are write-path operations: they may have applied even
+  when the invocation errors, so ambiguity must surface as :info."
   [op-kind]
   (case op-kind
-    (:write :cas) true
+    (:write :cas :add) true
     :read false))
 
 ;; ---------------------------------------------------------------------------
@@ -176,6 +179,13 @@
                ;; and applied, and its precondition did not hold.
                :mismatch {:type :fail, :error :precondition, :current x}
                :absent   {:type :fail, :error :precondition}
+               (unexpected-reply op-kind reply))
+      ;; ADD replies the value AFTER this apply (absent key counted as
+      ;; 0). The total rides :observed so the checker keeps the op's
+      ;; delta in :value while still seeing what the server reported —
+      ;; on a deduplicated retry this is the CACHED original total.
+      :add   (case tag
+               :val {:type :ok, :observed x}
                (unexpected-reply op-kind reply))
       :read  (case tag
                :val    {:type :ok, :value x}

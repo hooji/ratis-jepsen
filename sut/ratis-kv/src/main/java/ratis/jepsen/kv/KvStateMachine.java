@@ -211,6 +211,7 @@ public class KvStateMachine extends BaseStateMachine {
       }
       case Request.Put put -> new Reply.Err("write command PUT sent via read path");
       case Request.Cas cas -> new Reply.Err("write command CAS sent via read path");
+      case Request.Add add -> new Reply.Err("write command ADD sent via read path");
       case Request.Malformed malformed -> new Reply.Err(malformed.reason());
     };
     return CompletableFuture.completedFuture(Message.valueOf(KvCodec.encodeReply(reply)));
@@ -324,6 +325,14 @@ public class KvStateMachine extends BaseStateMachine {
         }
         target.put(cas.key(), cas.update());
         yield new Reply.Ok();
+      }
+      // The M3 increment: deliberately non-idempotent — a re-apply changes
+      // state — which is exactly what makes it the retry-cache probe. The
+      // reply carries the value AFTER this apply; on a deduplicated retry
+      // the server returns the CACHED original reply instead of re-applying.
+      case Request.Add add -> {
+        final long updated = target.merge(add.key(), add.delta(), Long::sum);
+        yield new Reply.Val(updated);
       }
       // A failed decode still reaches the log ("the log is the lock"); the
       // committed entry's reply is ERR rather than an exception (DESIGN 1.4).

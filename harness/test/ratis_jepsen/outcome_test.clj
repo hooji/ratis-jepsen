@@ -346,3 +346,20 @@
 
 (deftest rejects-unknown-op-kind
   (is (thrown? AssertionError (outcome/classify :increment "OK"))))
+
+(deftest row-add-replies
+  ;; Job 09: ADD replies VAL <total-after-this-apply>; the verdict keeps
+  ;; the total under :observed (the checker sums deltas from op :value;
+  ;; a deduplicated retry reports the CACHED original total).
+  (testing "VAL is the only legal ADD reply"
+    (is (= {:type :ok :observed 7} (outcome/classify :add "VAL 7")))
+    (is (= {:type :ok :observed -2} (outcome/classify :add "VAL -2"))))
+  (testing "every other reply shape is a protocol violation, loudly"
+    (doseq [reply ["OK" "ABSENT" "MISMATCH 2" "junk"]]
+      (let [v (outcome/classify :add reply)]
+        (is (= :fail (:type v)) reply)
+        (is (loud? v) reply))))
+  (testing "ADD is write-kind: ambiguity rows give :info"
+    (is (= {:type :info :error :not-leader} (outcome/classify :add not-leader)))
+    (is (= {:type :info :error :harness-timeout}
+           (outcome/classify :add (TimeoutException. "x"))))))

@@ -533,3 +533,185 @@
              (and require? (membership-ops? history) (churn-ops? history))
              (joined-nodes history)
              receives)))))))
+
+;; ---------------------------------------------------------------------------
+;; Counter checking (Job 09, M3): the exactly-once increment workload.
+;;
+;; Choice documented per the brief: NOT jepsen's stock counter checker —
+;; an explicit per-key bounds checker instead, because (a) our outcome
+;; map gives definite :fail semantics (a :fail add is PROVEN not applied,
+;; so it tightens the upper bound; the stock checker cannot assume that),
+;; (b) per-key independent histories keep the interval arithmetic exact
+;; and cheap, and (c) the final-read phase makes the generic read-bounds
+;; rule subsume final-value exactness: the last :ok read after the last
+;; add completion has lower = Σ ok-deltas (loss convicts) and
+;; upper = Σ ok+info+pending deltas (any double beyond the 0-or-1 :info
+;; allowance convicts).
+;;
+;; Soundness of the bounds (linearizable reads; positive deltas):
+;;   lower(read)  = Σ deltas of :ok adds whose COMPLETION precedes the
+;;                  read's INVOCATION — an :ok add is applied by its
+;;                  completion, and a read invoked later must observe it.
+;;   upper(read)  = Σ deltas of non-:fail adds whose INVOCATION precedes
+;;                  the read's COMPLETION — nothing invoked after the
+;;                  read completed can be visible, a :fail add is
+;;                  definitely-not-applied (outcome-map guarantee), and
+;;                  every :ok/:info/pending add counts ONCE — exactly-once
+;;                  for :ok, 0-or-1 for :info/pending.
+;; A double-applied :ok add pushes a later read above upper; a lost :ok
+;; add pulls the final read below lower.
+;;
+;; Also asserted: no two :ok adds report the same :observed total (ADD
+;; replies VAL <total-after-apply>; with adds-only keys and positive
+;; deltas totals strictly increase, so each apply's total is unique and a
+;; deduplicated retry returns the CACHED original — two ops sharing a
+;; total means the reply cache handed one op another op's reply, the
+;; repliedIndex-linearizability signal RATIS-2542 names).
+;; ---------------------------------------------------------------------------
+
+(defn- pair-counter-ops
+  "Folds one key's history (plain per-key values — independent tuples
+  already unwrapped) into {:adds [...], :reads [...]}: adds carry
+  {:delta :inv :comp :type :observed}, reads {:v :inv :comp :final?}
+  (:ok reads only; :comp/:type nil for ops with no completion — a
+  crashed worker's pending invocation)."
+  [ops]
+  (loop [ops   (seq ops)
+         i     0
+         open  {}   ; process -> {:f ... :inv i :value v :final? b}
+         adds  []
+         reads []]
+    (if-not ops
+      {:adds  (into adds (map (fn [[_ o]] (assoc o :comp nil :type nil))
+                              (filter (fn [[_ o]] (= :add (:f o))) open)))
+       :reads reads}
+      (let [{:keys [type f process value] :as op} (first ops)]
+        (cond
+          (= :invoke type)
+          (recur (next ops) (inc i)
+                 (assoc open process {:f f :inv i :delta value
+                                      :final? (boolean (:final? op))})
+                 adds reads)
+
+          ;; completion of whatever this process had open
+          (contains? open process)
+          (let [{:keys [f inv delta final?]} (get open process)
+                open (dissoc open process)]
+            (case f
+              :add  (recur (next ops) (inc i) open
+                           (conj adds {:delta delta :inv inv :comp i
+                                       :type type :observed (:observed op)})
+                           reads)
+              :read (recur (next ops) (inc i) open adds
+                           (if (= :ok type)
+                             (conj reads {:v (:value op) :inv inv :comp i
+                                          :final? final?})
+                             reads))
+              (recur (next ops) (inc i) open adds reads)))
+
+          :else
+          (recur (next ops) (inc i) open adds reads))))))
+
+(defn check-counter-key
+  "Pure: one key's ops in, verdict out (shape in the section comment)."
+  [ops]
+  (let [{:keys [adds reads]} (pair-counter-ops ops)
+        ok-adds     (filterv #(= :ok (:type %)) adds)
+        info-adds   (filterv #(= :info (:type %)) adds)
+        fail-adds   (filterv #(= :fail (:type %)) adds)
+        pending     (filterv #(nil? (:type %)) adds)
+        maybe-adds  (into (into ok-adds info-adds) pending)
+        read-violations
+        (into []
+              (keep (fn [{:keys [v inv final?] :as r}]
+                      ;; NB: the read's completion index must not be
+                      ;; destructured as `comp` — it would shadow
+                      ;; clojure.core/comp under the transducers below.
+                      (let [rc    (:comp r)
+                            lower (transduce (clojure.core/comp
+                                               (filter #(< (:comp % Long/MAX_VALUE) inv))
+                                               (map :delta))
+                                             + 0 ok-adds)
+                            upper (transduce (clojure.core/comp
+                                               (filter #(< (:inv %) rc))
+                                               (map :delta))
+                                             + 0 maybe-adds)]
+                        (when-not (<= lower v upper)
+                          {:kind  (if (< v lower) :lost-update :double-count)
+                           :read  {:value v :final? final?}
+                           :lower lower
+                           :upper upper}))))
+              reads)
+        dup-observed
+        (->> ok-adds
+             (keep :observed)
+             frequencies
+             (filter (fn [[_ n]] (< 1 n)))
+             (mapv (fn [[total n]]
+                     {:kind :duplicate-observed-value
+                      :observed total
+                      :ok-adds-sharing-it n})))
+        violations (into read-violations dup-observed)
+        final      (->> reads (filter :final?) last)]
+    {:valid?     (empty? violations)
+     :adds       {:ok (count ok-adds) :info (count info-adds)
+                  :fail (count fail-adds) :pending (count pending)}
+     :ok-sum     (transduce (map :delta) + 0 ok-adds)
+     :info-sum   (transduce (map :delta) + 0 (into info-adds pending))
+     :reads      (count reads)
+     :final-read final
+     :violations violations}))
+
+(defn counter
+  "The per-key counter checker (composed under jepsen.independent)."
+  []
+  (reify checker/Checker
+    (check [_this _test history _copts]
+      (check-counter-key history))))
+
+;; ---------------------------------------------------------------------------
+;; Retry evidence (Job 09): the dedup law. A dedicated dedup run must
+;; prove client retries actually happened — the library's same-callId
+;; retries are invisible unless counted, and a dedup test that never
+;; retried tested nothing. The client records each invocation's failed
+;; attempts (its retry activity) as :retries on the completion.
+;; ---------------------------------------------------------------------------
+
+(defn retry-totals
+  "Pure: total retry activity in a history — {:total n, :by-f {...}}."
+  [history]
+  (let [with (->> history
+                  (filter client-op?)
+                  (filter :retries))]
+    {:total (transduce (map :retries) + 0 with)
+     :ops   (count with)
+     :by-f  (reduce (fn [m op] (update m (:f op) (fnil + 0) (:retries op)))
+                    {} with)}))
+
+(defn retry-verdict
+  "Pure: the retry-evidence decision."
+  [required? {:keys [total] :as totals}]
+  (cond
+    (not required?)
+    (assoc totals :valid? true
+           :note "retry evidence not required for this run")
+
+    (pos? total)
+    (assoc totals :valid? true)
+
+    :else
+    (assoc totals :valid? false
+           :error :no-retry-evidence
+           :note (str "a dedup run owes proof that client retries happened, "
+                      "but no invocation recorded any retry activity — the "
+                      "retry cache was never exercised"))))
+
+(defn retry-evidence
+  "The retry-evidence checker; REQUIRED when :require-evidence? (the
+  counter workload sets it for fault-bearing runs)."
+  ([] (retry-evidence {}))
+  ([opts]
+   (let [require? (boolean (:require-evidence? opts))]
+     (reify checker/Checker
+       (check [_this _test history _copts]
+         (retry-verdict require? (retry-totals history)))))))

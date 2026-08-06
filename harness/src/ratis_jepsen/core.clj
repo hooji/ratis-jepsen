@@ -22,7 +22,12 @@
   membership, joiner-install for the combined kind).
   `clojure -M:run test --help` for the options; the interesting ones:
 
-    --workload register        (the only workload until M3)
+    --workload register|counter
+                               register = the M0 r/w/cas linearizability
+                               workload; counter = the M3 exactly-once
+                               increment workload (known-delta :add ops,
+                               per-key counter bounds checking, retry
+                               evidence law)
     --nemesis none|partition|crash|pause|mixed|snapshot-churn|transfer|
               membership|membership-snapshot-churn|listener-probe|mixed-all
                                fault schedule (default none); crash =
@@ -73,12 +78,13 @@
             [ratis-jepsen.db :as db]
             [ratis-jepsen.env-contract :as env]
             [ratis-jepsen.nemesis :as nemesis]
+            [ratis-jepsen.workload.counter :as counter]
             [ratis-jepsen.workload.register :as register]))
 
 (def workloads
-  "Workload name -> (fn [opts] {:generator, :checker}). M3 adds the
-  increment workload here."
-  {"register" register/workload})
+  "Workload name -> (fn [opts] {:generator, :checker})."
+  {"register" register/workload
+   "counter"  counter/workload})
 
 (def cli-opts
   "Additional CLI options, merged over jepsen's test-opt-spec (same
@@ -182,6 +188,14 @@
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
+   [nil "--retry-delay-ms MILLIS" "Client-side delay between same-callId retry attempts (default 200, the M1-established policy). The Q14 expiry run raises it above the shrunken server retry-cache window so the retry arrives after the entry expired; the harness invocation deadline widens automatically to cover the full attempt span."
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--retry-cache-expiry-ms MILLIS" "Start every node with raft.server.retrycache.expirytime overridden to this (absent: the Ratis default 60 s stays untouched). Q14 test lever only — shrinking it below the client's total retry span re-arms the documented retry double-apply boundary, so a run with this flag can be red BY DESIGN."
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
    [nil "--seed-bug MODE" "Start every node with a deliberately seeded SUT bug (stale-reads). Testing the harness only — a run with this flag is expected to FAIL its checker."
     :validate [#{"stale-reads"} "Must be: stale-reads"]]
 
@@ -202,17 +216,22 @@
     :validate [pos? "Must be positive"]]])
 
 (defn workload-defaults
-  "Fills :rate and :ops-per-key when the CLI left them unset — per
-  nemesis kind: the combined membership-snapshot-churn kind inherits the
-  Job 07 churn numbers (rate 1.4, ops-per-key 800 — the sustained write
-  stream that crosses the server's purge.gap=1024 milestones), every
-  other kind keeps the M0 defaults (10.0, 300). Explicit CLI values
-  always win."
+  "Fills :rate and :ops-per-key when the CLI left them unset — per kind:
+  the combined membership-snapshot-churn kind inherits the Job 07 churn
+  numbers (rate 1.4, ops-per-key 800 — the sustained write stream that
+  crosses the server's purge.gap=1024 milestones), and the M3 counter
+  workload gets the same sustained stream for a different reason — its
+  retry-evidence law needs the op phase to overlap many leader-kill
+  windows, and CI dispatches scenarios with no extra flags (a
+  default-rate counter run would burn its budget in ~25 s and could
+  legally see zero retries). Every other combination keeps the M0
+  defaults (10.0, 300). Explicit CLI values always win."
   [opts]
-  (let [churny? (= "membership-snapshot-churn" (:nemesis opts))]
+  (let [sustained? (or (= "membership-snapshot-churn" (:nemesis opts))
+                       (= "counter" (:workload opts)))]
     (-> opts
-        (update :rate        #(or % (if churny? 1.4 10.0)))
-        (update :ops-per-key #(or % (if churny? 800 300))))))
+        (update :rate        #(or % (if sustained? 1.4 10.0)))
+        (update :ops-per-key #(or % (if sustained? 800 300))))))
 
 (defn ratis-test
   "Builds the test map from parsed CLI options: register workload +
@@ -243,7 +262,7 @@
                             (when (:seed-bug opts)
                               (str "-seedbug-" (:seed-bug opts))))
             :nodes     nodes
-            :db        (db/db (:seed-bug opts))
+            :db        (db/db (:seed-bug opts) (:retry-cache-expiry-ms opts))
             :client    (client/client)
             :nemesis   (:nemesis nem)
             :checker   (:checker workload)

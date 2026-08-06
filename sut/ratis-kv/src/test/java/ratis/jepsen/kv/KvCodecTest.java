@@ -53,6 +53,20 @@ class KvCodecTest {
   }
 
   @Test
+  void addRoundTrip() {
+    final Request request = new Request.Add("ctr_0", 5L);
+    final String wire = KvCodec.encodeRequest(request);
+    assertEquals("ADD ctr_0 5", wire);
+    assertEquals(request, KvCodec.decodeRequest(wire));
+  }
+
+  @Test
+  void addNegativeDeltaRoundTrip() {
+    final Request request = new Request.Add("k", -3L);
+    assertEquals(request, KvCodec.decodeRequest(KvCodec.encodeRequest(request)));
+  }
+
+  @Test
   void getRoundTrip() {
     final Request request = new Request.Get("K_9-z");
     final String wire = KvCodec.encodeRequest(request);
@@ -108,6 +122,10 @@ class KvCodecTest {
       "CAS k 1 2 3",                 // too many arguments
       "CAS k x 2",                   // non-long expect
       "CAS k 1 x",                   // non-long update
+      "ADD k",                       // missing delta
+      "ADD k 1 2",                   // too many arguments
+      "ADD k x",                     // non-long delta
+      "ADD !bad 1",                  // invalid key
       "put k 1",                     // commands are case-sensitive
       "FROB k",                      // unknown command
       " PUT k 1",                    // leading space
