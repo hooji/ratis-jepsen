@@ -627,7 +627,12 @@
                       ;; NB: the read's completion index must not be
                       ;; destructured as `comp` — it would shadow
                       ;; clojure.core/comp under the transducers below.
-                      (let [rc    (:comp r)
+                      ;; A nil v is the ABSENT reply — an untouched
+                      ;; counter reads as 0 (the SUT's ADD treats an
+                      ;; absent key as 0; found live: the first reads of
+                      ;; a key race its first add and NPE'd the bounds).
+                      (let [v     (or v 0)
+                            rc    (:comp r)
                             lower (transduce (clojure.core/comp
                                                (filter #(< (:comp % Long/MAX_VALUE) inv))
                                                (map :delta))

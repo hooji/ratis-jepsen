@@ -571,3 +571,22 @@
     (let [v (checker/retry-verdict false {:total 0 :ops 0 :by-f {}})]
       (is (true? (:valid? v)))
       (is (some? (:note v))))))
+
+(deftest counter-absent-reads-count-as-zero
+  ;; GET of an untouched counter replies ABSENT (:value nil): that is a
+  ;; legal read of 0 before any add lands (found live — the first reads
+  ;; of a key race its first add), and a LYING absent after an :ok add
+  ;; is a lost update.
+  (testing "an early absent read is a read of 0"
+    (let [h [(cop 0 :invoke :read nil) (cop 0 :ok :read nil)
+             (cop 1 :invoke :add 5) (cop 1 :ok :add 5)
+             (cop 0 :invoke :read nil {:final? true})
+             (cop 0 :ok :read 5)]]
+      (is (true? (:valid? (checker/check-counter-key h))))))
+  (testing "absent AFTER an :ok add convicts as a lost update"
+    (let [h [(cop 1 :invoke :add 5) (cop 1 :ok :add 5)
+             (cop 0 :invoke :read nil {:final? true})
+             (cop 0 :ok :read nil)]
+          v (checker/check-counter-key h)]
+      (is (false? (:valid? v)))
+      (is (= :lost-update (:kind (first (:violations v))))))))
