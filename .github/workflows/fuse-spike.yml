@@ -1,0 +1,104 @@
+# Copyright 2026 the ratis-jepsen authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# ============================================================================
+# SPIKE ARTIFACT (Job 10) — THROWAWAY. Not part of the test matrix.
+#
+# Answers PLAN Q7(c), the question gating M4: can lazyfs (FUSE-based
+# lost-write simulation) mount and inject un-fsynced-data loss inside a
+# privileged container on a GitHub-hosted runner? One job, dispatch-only,
+# self-contained; delete once M4's real workflow lands. The experiment
+# mirrors the local proof in jobs/10-fuse-spike/10_report.md: build lazyfs
+# at the pinned commit, mount it in a privileged ubuntu:24.04 container
+# (the same base as env/Dockerfile) with /dev/fuse, write one un-fsynced
+# and one fsynced file through the mount, drop the cache via lazyfs's
+# fault fifo, and assert the un-fsynced file lost its data while the
+# fsynced one kept it. Green = CI-viable; the run's log is the evidence.
+# ============================================================================
+
+name: fuse-spike
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuse-spike:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Runner-side FUSE facts
+        run: |
+          uname -a
+          ls -la /dev/fuse
+          grep fuse /proc/filesystems || true
+
+      - name: LazyFS loss experiment in a privileged container
+        run: |
+          cat > /tmp/spike.sh <<'SPIKE'
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          # The env image's package set (env/Dockerfile installs from the
+          # same ubuntu:24.04 archives) plus the lazyfs build deps.
+          apt-get update -qq
+          apt-get install -y -qq g++ cmake git ca-certificates fuse3 libfuse3-dev libfuse3-3 > /dev/null
+          ls -la /dev/fuse
+
+          # lazyfs at the commit the local proof used (Job 10 report).
+          git clone https://github.com/dsrhaslab/lazyfs.git /root/lazyfs
+          cd /root/lazyfs
+          git checkout 045a0b3a1126725e693934e29d3ba15e08cc39ec
+          (cd libs/libpcache && ./build.sh)
+          (cd lazyfs && ./build.sh)
+
+          grep -q user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf
+          mkdir -p /tmp/lazyfs.mnt /tmp/lazyfs.root
+          cd /root/lazyfs/lazyfs
+          ./scripts/mount-lazyfs.sh -c config/default.toml -m /tmp/lazyfs.mnt -r /tmp/lazyfs.root
+          # the mount takes a moment (1 GiB cache pre-allocation)
+          for i in $(seq 1 60); do
+            mount | grep -q "fuse.lazyfs" && break
+            sleep 1
+          done
+          mount | grep fuse.lazyfs
+
+          # One un-fsynced write, one fsynced write, through the mount.
+          echo "unsynced data" > /tmp/lazyfs.mnt/unsynced.txt
+          echo "fsynced data" > /tmp/lazyfs.mnt/synced.tmp
+          dd if=/tmp/lazyfs.mnt/synced.tmp of=/tmp/lazyfs.mnt/synced.txt conv=fsync
+          echo "--- before drop (mount view):"
+          cat /tmp/lazyfs.mnt/unsynced.txt
+          cat /tmp/lazyfs.mnt/synced.txt
+          echo "--- before drop (backing root — what power loss would keep):"
+          stat -c '%n %s bytes' /tmp/lazyfs.root/*.txt
+
+          # The fault: drop everything un-fsynced.
+          echo "lazyfs::clear-cache" > /tmp/faults.fifo
+          sleep 2
+
+          echo "--- after drop (mount view):"
+          UNSYNCED_SIZE=$(stat -c %s /tmp/lazyfs.mnt/unsynced.txt)
+          SYNCED_CONTENT=$(cat /tmp/lazyfs.mnt/synced.txt)
+          stat -c '%n %s bytes' /tmp/lazyfs.mnt/*.txt
+
+          # The assertions that make green = proof:
+          test "$UNSYNCED_SIZE" -eq 0 || { echo "FAIL: un-fsynced data SURVIVED the drop"; exit 1; }
+          test "$SYNCED_CONTENT" = "fsynced data" || { echo "FAIL: fsynced data was LOST"; exit 1; }
+          echo "PROOF: un-fsynced write dropped, fsynced write survived — lazyfs works here."
+          SPIKE
+          docker run --rm --privileged --device /dev/fuse \
+            -v /tmp/spike.sh:/spike.sh:ro \
+            ubuntu:24.04 bash /spike.sh
