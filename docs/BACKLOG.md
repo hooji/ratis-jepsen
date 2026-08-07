@@ -48,11 +48,19 @@ coordinator turns these into jobs when their milestone arrives.*
    one issue for the base-class/lifecycle trap (fix: default `pause()`
    honoring the contract, or reload tolerating it), one for install
    retry backoff. Stores + exact frames in
-   `reviews/08-membership-churn/08_report.md`.
-8. **Upstream candidate #2: `GroupInfoReply.getConf()` dropped by the
-   wire serializer** at 3.2.2 (`toGroupInfoReplyProto` never sets the
-   field) — Job 08, verified by Review 08. Harness works around via
-   log-line conf census (transitional-entries-only counting).
+   `reviews/08-membership-churn/08_report.md`. **Still present at the
+   3.3.0 RC2 artifacts** (Job 12 / Review 12: in-JVM library probe with
+   a naive `BaseStateMachine` subclass; 3.2.2 control arm reproduces
+   the Job 08 conviction, RC2 arm behaves identically).
+8. **FIXED UPSTREAM (regression-test material, not a defect report):
+   `GroupInfoReply.getConf()` dropped by the wire serializer** at
+   3.2.2 (`toGroupInfoReplyProto` never sets the field) — Job 08,
+   verified by Review 08. **Job 12 / Review 12 (2026-08-06) confirmed
+   it is populated at the 3.3.0 RC2 artifacts** (one-line source
+   change located and quoted; verified over real gRPC). Our log-census
+   workaround remains functional and is still required for 3.2.2, with
+   no version branch needed. Upstream framing: not a defect to report
+   — offer the test that keeps it fixed.
 9. **Upstream candidate #3: staged LISTENER never leaves STARTING —
    the RATIS-1825 corroboration.** Job 08's probe, reproduced by
    Review 08, both stores preserved: conf-level listener staging,
@@ -64,7 +72,9 @@ coordinator turns these into jobs when their milestone arrives.*
    suspect: the filter needs `containsInConf(id, FOLLOWER, LISTENER)`.
    This answers the evaluation's open RATIS-1825 question with a
    mechanism and a candidate fix — prime material for the upstream
-   engagement.
+   engagement. **Still present at the 3.3.0 RC2 artifacts** (Job 12 /
+   Review 12: all four conf transitions commit, reads still refused in
+   STARTING, mechanism source-identical).
 10. **Upstream question (not yet a candidate): no parent-directory
     sync after the raft-meta rename.** Job 11 / Review 11
     (2026-08-06). Established: `term`/`votedFor` are written and
