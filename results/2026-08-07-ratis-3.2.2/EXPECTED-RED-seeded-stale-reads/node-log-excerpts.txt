@@ -1,0 +1,14 @@
+# Evidence excerpts grep'd from this run's per-node logs
+# (<store>/<node>/ratis-kv.log and, on durability runs, lazyfs.log).
+# grep -E pattern: SEEDED BUG ACTIVE
+
+n1/ratis-kv.log:54:2026-08-07 18:13:18.884 [n1-impl-thread1] WARN org.apache.ratis.statemachine.StateMachine - *** SEEDED BUG ACTIVE: stale-reads ***
+n1/ratis-kv.log:96:2026-08-07 18:13:19.100 [main] WARN ratis.jepsen.kv.Main - *** SEEDED BUG ACTIVE: stale-reads ***
+n2/ratis-kv.log:54:2026-08-07 18:13:18.530 [n2-impl-thread1] WARN org.apache.ratis.statemachine.StateMachine - *** SEEDED BUG ACTIVE: stale-reads ***
+n2/ratis-kv.log:97:2026-08-07 18:13:18.701 [main] WARN ratis.jepsen.kv.Main - *** SEEDED BUG ACTIVE: stale-reads ***
+n3/ratis-kv.log:54:2026-08-07 18:13:19.145 [n3-impl-thread1] WARN org.apache.ratis.statemachine.StateMachine - *** SEEDED BUG ACTIVE: stale-reads ***
+n3/ratis-kv.log:97:2026-08-07 18:13:19.248 [main] WARN ratis.jepsen.kv.Main - *** SEEDED BUG ACTIVE: stale-reads ***
+n4/ratis-kv.log:54:2026-08-07 18:13:19.180 [n4-impl-thread1] WARN org.apache.ratis.statemachine.StateMachine - *** SEEDED BUG ACTIVE: stale-reads ***
+n4/ratis-kv.log:96:2026-08-07 18:13:19.284 [main] WARN ratis.jepsen.kv.Main - *** SEEDED BUG ACTIVE: stale-reads ***
+n5/ratis-kv.log:54:2026-08-07 18:13:18.335 [n5-impl-thread1] WARN org.apache.ratis.statemachine.StateMachine - *** SEEDED BUG ACTIVE: stale-reads ***
+n5/ratis-kv.log:96:2026-08-07 18:13:18.618 [main] WARN ratis.jepsen.kv.Main - *** SEEDED BUG ACTIVE: stale-reads ***

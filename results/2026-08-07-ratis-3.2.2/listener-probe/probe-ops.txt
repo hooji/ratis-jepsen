@@ -1,0 +1,12 @@
+:nemesis	:info	:listener-add	nil
+:nemesis	:info	:listener-add	{:probe :listener-add, :target "n7", :bootstrap {:success? true}, :result {:success? true, :committed {:servers ["n1" "n2" "n3" "n4" "n5"], :listeners ["n7"]}, :census {:index 0, :servers ["n1" "n2" "n3" "n4" "n5"], :listeners [], :stable? true}}}
+:nemesis	:info	:listener-census	nil
+:nemesis	:info	:listener-census	{:probe :listener-census, :target "n7", :node-view {:last-conf {:index 982, :servers ["n1" "n2" "n3" "n4" "n5"], :listeners ["n7"], :stable? true}, :conf-lines 3}, :cluster-census {:index 982, :servers ["n1" "n2" "n3" "n4" "n5"], :listeners ["n7"], :stable? true}, :targeted-read [:error "org.apache.ratis.protocol.exceptions.ServerNotReadyException" "n7@group-ABBC16E54704 is not in [RUNNING]: current state is STARTING"]}
+:nemesis	:info	:listener-promote	nil
+:nemesis	:info	:listener-promote	{:probe :listener-promote, :target "n7", :result {:success? true, :committed {:servers ["n1" "n2" "n3" "n4" "n5" "n7"], :listeners []}, :census {:index 982, :servers ["n1" "n2" "n3" "n4" "n5"], :listeners ["n7"], :stable? true}}}
+:nemesis	:info	:listener-census	nil
+:nemesis	:info	:listener-census	{:probe :listener-census, :target "n7", :node-view {:last-conf {:index 1973, :servers ["n1" "n2" "n3" "n4" "n5" "n7"], :listeners [], :stable? true}, :conf-lines 5}, :cluster-census {:index 1973, :servers ["n1" "n2" "n3" "n4" "n5" "n7"], :listeners [], :stable? true}, :targeted-read [:error "org.apache.ratis.protocol.exceptions.ServerNotReadyException" "n7@group-ABBC16E54704 is not in [RUNNING]: current state is STARTING"]}
+:nemesis	:info	:listener-demote	nil
+:nemesis	:info	:listener-demote	{:probe :listener-demote, :target "n7", :result {:success? true, :committed {:servers ["n1" "n2" "n3" "n4" "n5"], :listeners ["n7"]}, :census {:index 1973, :servers ["n1" "n2" "n3" "n4" "n5" "n7"], :listeners [], :stable? true}}}
+:nemesis	:info	:listener-remove	nil
+:nemesis	:info	:listener-remove	{:probe :listener-remove, :target "n7", :result {:success? true, :committed {:servers ["n1" "n2" "n3" "n4" "n5"], :listeners []}, :census {:index 1977, :servers ["n1" "n2" "n3" "n4" "n5"], :listeners ["n7"], :stable? true}}, :pool-return {"n7" :started}}

@@ -1,0 +1,6 @@
+# Evidence excerpts grep'd from this run's per-node logs
+# (<store>/<node>/ratis-kv.log and, on durability runs, lazyfs.log).
+# grep -E pattern: send snapshot|receive installSnapshot
+
+n2/ratis-kv.log:222:2026-08-07 18:22:24.370 [n2@group-ABBC16E54704->n5-GrpcLogAppender-LogAppenderDaemon] INFO org.apache.ratis.grpc.server.GrpcLogAppender - n2@group-ABBC16E54704->n5-GrpcLogAppender: followerNextIndex = 820 but logStartIndex = 946, send snapshot SingleFileSnapshotInfo(t:2, i:1238):[/var/lib/ratis-kv/724d1912-848e-4e0f-a7e0-abbc16e54704/sm/snapshot.2_1238] to follower
+n5/ratis-kv.log:251:2026-08-07 18:22:24.420 [grpc-default-executor-1] INFO org.apache.ratis.server.impl.SnapshotInstallationHandler - n5@group-ABBC16E54704: receive installSnapshot: n2->n5#0-t2,chunk:4c4e657e-be75-453d-a1bc-53c8de94d027,0 

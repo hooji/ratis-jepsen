@@ -1,0 +1,15 @@
+# Evidence excerpts grep'd from this run's per-node logs
+# (<store>/<node>/ratis-kv.log and, on durability runs, lazyfs.log).
+# grep -E pattern: received 'lazyfs::clear-cache'|cache is cleared|torn-op|will persist [0-9]+ bytes|Killing LazyFS|ChecksumException|Log entry corrupted|Failed to initRaftLog
+
+n3/ratis-kv.log:29807:java.util.concurrent.CompletionException: java.lang.IllegalStateException: n3@group-ABBC16E54704: Failed to initRaftLog.
+n3/ratis-kv.log:29819:Caused by: java.lang.IllegalStateException: n3@group-ABBC16E54704: Failed to initRaftLog.
+n3/ratis-kv.log:29828:Caused by: org.apache.ratis.protocol.exceptions.ChecksumException: Log entry corrupted: Calculated checksum is 3C71E2ED but read checksum is 00000000.
+n3/ratis-kv.log:29851:java.util.concurrent.CompletionException: java.lang.IllegalStateException: n3@group-ABBC16E54704: Failed to initRaftLog.
+n3/ratis-kv.log:29863:Caused by: java.lang.IllegalStateException: n3@group-ABBC16E54704: Failed to initRaftLog.
+n3/ratis-kv.log:29872:Caused by: org.apache.ratis.protocol.exceptions.ChecksumException: Log entry corrupted: Calculated checksum is 3C71E2ED but read checksum is 00000000.
+n3/lazyfs.log:19:[2026-08-07 18:22:34.809] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::torn-op::file=/var/lib/ratis-kv.root/724d1912-848e-4e0f-a7e0-abbc16e54704/current/log_inprogress_0::parts=3::persist=1'
+n3/lazyfs.log:21:[2026-08-07 18:22:34.809] [console] [info] [lazyfs.faults.worker]: torn-op
+n3/lazyfs.log:25:[2026-08-07 18:22:34.811] [console] [info] [lazyfs.faults.worker]: configured successfully 'lazyfs::torn-op::file=/var/lib/ratis-kv.root/724d1912-848e-4e0f-a7e0-abbc16e54704/current/log_inprogress_0::parts=3::persist=1'
+n3/lazyfs.log:26:[2026-08-07 18:22:34.824] [console] [warning] [lazyfs.faults]: Write to path /var/lib/ratis-kv.root/724d1912-848e-4e0f-a7e0-abbc16e54704/current/log_inprogress_0: will persist 14 bytes from offset 54258
+n3/lazyfs.log:39:[2026-08-07 18:22:34.825] [console] [critical] Killing LazyFS pid 72!
