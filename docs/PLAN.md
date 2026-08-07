@@ -90,6 +90,13 @@ Context this project inherits (evidence in
 - TLA+/model checking (different tool, different project).
 - Testing bare RocksDB behavior (the L2 provider has its own contract tests).
 
+*(2026-08-07, Job 13: two of these non-goals have since been delivered
+as their own milestones exactly as flagged — lazyfs/durability faults
+at M4 (job 11) and mixed-version/rolling-upgrade topologies at M5
+(job 12). The rest still stand: no performance measurement, no
+multi-group/DataStream/TLS/non-Linux, no TLA+, no bare-RocksDB
+testing.)*
+
 ## 4. Proposed shape (pending §6 answers)
 
 ```
@@ -141,6 +148,15 @@ ratis-jepsen/
 | Partition/pause (stock) | baseline election + log safety |
 
 ## 5. Milestones (rough effort from the 2026-08-02 estimate)
+
+*Status as of 2026-08-07: **M0–M5 all complete** — jobs 01–12, each
+merged after an independent review. The list below is the original plan;
+what each milestone actually delivered is in the job reports, and every
+gate run is in `docs/RUNS.md`. Deviations worth knowing: M1 shipped the
+liveness checker but not the elle migration (knossos remains the
+register checker — BACKLOG 13), M3's Q14 run needed a new
+`quorum-pause` nemesis to reach the expiry hazard, and M5 ran against
+3.3.0 RC2 rather than a completed release.*
 
 - **M0 — walking skeleton** (~1 wk): SUT server + tarball; harness brings up
   5 nodes, runs register workload with partition nemesis, knossos-checks a
@@ -286,7 +302,58 @@ constrain everything downstream and should be settled first.
   we keep a `results/` ledger in-repo (leaning: no — artifacts in CI,
   summaries in docs).
 
+### G. How the open questions actually resolved (amendment, 2026-08-07, Job 13)
+
+The leanings above are preserved as written. Where the built repository
+settled a question differently, or settled one the text left open, this
+is the record:
+
+- **Q6 (read modes)** — leader- *and* follower-linearizable reads both
+  ship (`--reads leader|follower|mixed`, M2/job 07). Weaker read modes
+  under a weaker checker stayed deferred, as the leaning said.
+- **Q10 (checker strategy)** — **elle was not adopted**; knossos with a
+  `cas-register` model is the register checker to this day, and the
+  budget is enforced in code (`--key-count`, `--ops-per-key`,
+  per-key concurrency). The migration is banked as BACKLOG 13 and would
+  retire a real tuning class (analysis cost varies ~2× by host, and
+  three runs have been pushed out of memory by `:info` mass — all
+  preserved in `docs/RUNS.md`).
+- **Q11 (liveness)** — answered yes, with nemesis-aware gating built
+  from the nemesis's own fault→heal vocabulary (job 05).
+- **Q12 (server-side evidence)** — went further than the leaning:
+  per-run node logs are collected *and* asserted on. The evidence
+  checkers fail a run whose fault did not demonstrably happen
+  (install-snapshot events, committed conf transitions, joiner
+  installs, lazyfs fault acks, applied rolls). Metrics snapshots were
+  never wired up.
+- **Q13 (config profiles)** — no defaults profile, as the leaning said.
+  The one deviation is a deliberate test lever, not a profile:
+  `--retry-cache-expiry-ms` (Q14).
+- **Q14 (retry-cache expiry)** — demonstrated at M3, but only after
+  three failed attempts: the hazard is **timeout-shaped, not
+  crash-shaped**, and reaching it needed a new `quorum-pause` nemesis.
+- **Q15 (initial version)** — 3.2.2 remains the default pin; 3.3.0
+  joined the matrix at RC2 rather than at release.
+- **Q18 (definition of green)** — a passing run asserts linearizability
+  (or counter bounds) *and* liveness *and* the run's fault evidence,
+  with no unhandled exceptions. `store/` artifacts are retained 7 days
+  in CI; there is no in-repo `results/` ledger — summaries live in
+  `docs/RUNS.md`, as the leaning proposed.
+
 ## 7. Immediate next steps
+
+*(updated 2026-08-07 (docs refresh, Job 13): **M5 complete** — job 12
+merged (version matrix 3.2.2 vs 3.3.0 RC2 + mixed-version and
+rolling-upgrade topologies), which is the whole of M5 as scoped in §5;
+Q15's "add 3.3.0 to the matrix the week it ships" is therefore
+discharged early, against the release candidate rather than a
+completed release — 3.3.0 was still under vote on 2026-08-07 and the
+ledger labels it RC2 everywhere. All six milestones M0–M5 are now
+merged. Two things §5 left implicit remain undone and unscheduled: the
+elle migration (still knossos; BACKLOG 13) and the RocksDB state
+machine (Q4's later stage). The upstream question of §2.3 is still
+open — nothing has been filed against Ratis; step 4 below is the next
+decision, now with the working artifact it asked for.)*
 
 *(updated 2026-08-06 (later): **M3 complete** — job 09 merged: exactly-once held under leader-kill churn at the default window; Q14 boundary demonstrated red only past it (quorum-pause nemesis; hazard is timeout-shaped, pre-step-down slice). **M4 complete** — job 11 merged: storage-durability faults
 (minority/whole-cluster un-synced discard, torn write) all met their
