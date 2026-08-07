@@ -595,9 +595,24 @@ upstream-CounterStateMachine template our fixed SUT would mask):
 |---|---|---|---|---|
 | register + partition, static n1–n3 old / n4–n5 new | 0 | 318 s | 1079 / 417 / 4 | `…partition-mixed-3.2.2-3.3.0/143539.884Z` |
 | register + crash, same static split | 0 | 317 s | 1119 / 370 / 11 | `…crash-mixed-3.2.2-3.3.0/144053.559Z` |
-| rolling upgrade (all-old → roll n1…n5 to new under load) | ROLLING_EXIT | ROLLING_WALL | ROLLING_COUNTS | `…rolling-upgrade-mixed-3.2.2-3.3.0/ROLLING_TS` |
+| rolling upgrade (all-old → roll n1…n5 to new under load) | 0 | 179 s | 1083 / 417 / 0 | `…rolling-upgrade-mixed-3.2.2-3.3.0/144611.090Z` |
 
-ROLLING_DETAIL
+The rolling run's evidence checker: **5/5 rolls applied, none failed,
+none missing, zero skips** — each `:roll` op records
+kill → symlink flip → restart → NEW startup line awaited, with the
+version map walking `n1…n5` from all-`3.2.2` to all-`3.3.0` (op values
+carry `:versions-now` at each step, e.g. after the third roll:
+`{"n1" "3.3.0", "n2" "3.3.0", "n3" "3.3.0", "n4" "3.2.2", "n5"
+"3.2.2"}`). Every 3.3.0 node opened its predecessor's 3.2.2-written
+raft storage in place (RECOVER); linearizability and liveness held
+through every intermediate mix, and the run's tail was the 3.2.2
+client against an all-3.3.0 cluster. The shorter wall is benign: rolls
+complete in seconds and no fault windows stretch op latencies, so the
+1500-op budget (and the finite roll script) exhaust before the 300 s
+limit. The **version-skew guard**'s negative arm also ran: launching
+the harness with a 3.2.2 classpath but `--ratis-version 3.3.0`
+refuses with `version skew: this JVM runs ratis-client 3.2.2 but the
+run wants 3.3.0` before touching any node.
 
 **Comparison table — scenario × version × outcome** (3.2.2 column =
 this ledger's earlier gates + today's baseline; every cell a real run):
@@ -612,6 +627,6 @@ this ledger's earlier gates + today's baseline; every cell a real run):
 | membership + conf evidence | GREEN (M2) | GREEN | — |
 | unsync-drop (lazyfs durability) | GREEN (M4) | GREEN | — |
 | listener-probe (BACKLOG 9) | conf mechanics pass; **staged listener never serves** | **same wedge** | — |
-| rolling upgrade 3.2.2→3.3.0 | — | — | ROLLING_CELL |
+| rolling upgrade 3.2.2→3.3.0 | — | — | GREEN, 5/5 rolled |
 | Library probe: base pause()/install (BACKLOG 7) | division dies; no-backoff hammering | **division dies; no-backoff hammering** (persists) | — |
 | Library probe: GroupInfoReply conf (BACKLOG 8) | dropped (empty) | **populated (fixed)** | — |
