@@ -69,7 +69,7 @@
 
 (deftest row-reply-success
   (testing "write OK ⇒ :ok"
-    (is (= {:type :fail} (outcome/classify :write "OK"))))
+    (is (= {:type :ok} (outcome/classify :write "OK"))))
   (testing "cas OK ⇒ :ok"
     (is (= {:type :ok} (outcome/classify :cas "OK"))))
   (testing "read VAL v ⇒ :ok with the value"
