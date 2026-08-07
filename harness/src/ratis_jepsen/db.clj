@@ -519,25 +519,39 @@
       (str/replace-first (str/trim out) env/storage-dir env/backing-dir))))
 
 (defn torn-write-command
-  "The lazyfs torn-op fifo command (pure; the grammar is the lazyfs
-  README's — parameters that hold multiple values lose their brackets):
-  tear the `occurrence`-th write to `backing-file` into `parts` equal
-  parts and persist only part 1 (the head survives, the tail dies with
-  the cache)."
-  [backing-file parts occurrence]
+  "The lazyfs torn-op fifo command (pure): tear the NEXT write to
+  `backing-file` into `parts` equal parts of which only `persist-part`
+  reaches the backing store; lazyfs then SIGKILLs itself, so the rest of
+  that write — and everything else un-synced — dies with its cache.
+
+  Grammar note, pinned by experiment at the Job 10 commit: the fifo
+  parser REJECTS an `occurrence=` attribute for torn-op (its attribute
+  loop knows only file/parts/parts_bytes/persist, so occurrence= trips
+  the unknown-attribute branch and the fault is silently dropped —
+  while the handler still logs 'configured successfully', a second bug:
+  it checks only add_torn_op_fault's errors, which never ran), and
+  add_torn_op_fault hardcodes occurrence=1 anyway. Net semantics of the
+  working form below: the first write to the file after arming is the
+  one torn. Both bugs are documented in the Job 11 report as lazyfs
+  upstream candidates; the toml [[injection]] route honors occurrence
+  but must be configured at mount time, which is why the nemesis arms
+  at runtime with next-write semantics instead.
+
+  persist-part 1 keeps the head of the torn write (the truest
+  sequential-power-loss shape — biases recovery toward clean tail
+  truncation); persist-part 2 keeps a middle fragment behind a hole
+  (biases recovery toward the loud CorruptionPolicy=EXCEPTION refusal:
+  non-zero bytes past the apparent log end)."
+  [backing-file parts persist-part]
   (str "lazyfs::torn-op::file=" backing-file
-       "::parts=" parts "::persist=1"
-       "::occurrence=" occurrence))
+       "::parts=" parts "::persist=" persist-part))
 
 (defn torn-write!
-  "Arms lazyfs's torn-op fault on `backing-file`: the `occurrence`-th
-  write to it after arming is split into `parts` equal parts of which
-  only part 1 reaches the backing store; lazyfs then SIGKILLs itself, so
-  the rest of that write — and everything else un-synced — dies with its
-  cache. The tear lands at the tail of the durable log: exactly a
-  power loss mid-write."
-  [backing-file parts occurrence]
-  (lazyfs-command! (torn-write-command backing-file parts occurrence)))
+  "Arms lazyfs's torn-op fault on `backing-file` (see
+  torn-write-command): the next write to it is torn and lazyfs kills
+  itself — a power loss mid-write, at sub-page granularity."
+  [backing-file parts persist-part]
+  (lazyfs-command! (torn-write-command backing-file parts persist-part)))
 
 (defn torn-write-fired?
   "Did an armed torn-op actually fire on this node? lazyfs logs the

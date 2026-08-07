@@ -263,15 +263,19 @@
       (is (= "128mb" db/lazyfs-cache-size)))))
 
 (deftest torn-write-command-shape
-  (testing "the fifo command lazyfs parses (README torn-op grammar):
-            exact backing path, parts, persist head-only, occurrence"
+  (testing "the fifo command in the form the pinned lazyfs actually
+            accepts: exact backing path, parts, persist — and NO
+            occurrence attribute (the fifo parser silently drops the
+            whole fault when one is present; next-write semantics)"
     (is (= (str "lazyfs::torn-op::file=/var/lib/ratis-kv.root/g/current/"
-                "log_inprogress_42::parts=3::persist=1::occurrence=3")
+                "log_inprogress_42::parts=3::persist=1")
            (db/torn-write-command
-             "/var/lib/ratis-kv.root/g/current/log_inprogress_42" 3 3))))
+             "/var/lib/ratis-kv.root/g/current/log_inprogress_42" 3 1)))
+    (is (.endsWith (db/torn-write-command "/x" 3 2) "::persist=2"))
+    (is (not (.contains (db/torn-write-command "/x" 3 1) "occurrence"))))
   (testing "no brackets ever appear (multi-value params travel bare on
             the fifo, unlike the toml form)"
-    (is (not (.contains (db/torn-write-command "/x" 3 5) "[")))))
+    (is (not (.contains (db/torn-write-command "/x" 3 1) "[")))))
 
 (deftest mount-unproven-error-is-distinct
   (testing "the evidence-law marker string is stable and shouting —

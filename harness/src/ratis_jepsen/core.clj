@@ -193,8 +193,11 @@
     :parse-fn #(Double/parseDouble %)
     :validate [pos? "Must be positive"]]
 
-   [nil "--key-count NUMBER" "How many independent register keys to run through"
-    :default 5
+   ;; No cli-level default: per kind (workload-defaults) — 5 everywhere
+   ;; (the M0 budget) except unsync-drop-all, which spreads the same
+   ;; concurrency over 10 keys so each key runs ONE worker (the knossos
+   ;; :info budget under whole-cluster outages; see nemesis).
+   [nil "--key-count NUMBER" "How many independent keys to run through (default 5; unsync-drop-all 10 — one worker per key)"
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]
 
@@ -220,6 +223,11 @@
     :validate [#{"stale-reads"} "Must be: stale-reads"]]
 
    [nil "--durability" "Mount every node's raft storage as lazyfs (Job 11/M4 storage-durability topology), proving the mount per node and failing the run loudly if it cannot. Forced on by the durability nemeses (unsync-drop, unsync-drop-all, torn-write)."]
+
+   [nil "--torn-persist-part PART" "torn-write only: which third of the torn write reaches the backing store. 1 (default) keeps the head — the truest sequential power loss, biasing recovery toward clean tail truncation; 2 keeps a middle fragment behind a zero hole, biasing recovery toward the loud CorruptionPolicy=EXCEPTION refusal. Both outcomes are legal and recorded."
+    :default 1
+    :parse-fn #(Long/parseLong %)
+    :validate [#{1 2 3} "Must be 1, 2 or 3 (the torn write has 3 parts)"]]
 
    [nil "--store-dir DIR" "Directory jepsen writes its store/ results under"
     :default "store"]
@@ -253,7 +261,14 @@
   small (the calm-25 s/rate-10 shakedown OOMed analysis on every key —
   see nemesis/unsync-drop-all-cycle); at 0.5 the default 300-op budget
   also exactly spans a 300 s run. Every other combination keeps the M0
-  defaults (10.0, 300). Explicit CLI values always win."
+  defaults (10.0, 300, 5 keys). Explicit CLI values always win.
+
+  unsync-drop-all additionally defaults :key-count to 10: with the
+  shared concurrency 10 that is ONE worker per key, halving each key's
+  forever-concurrent :info mass (a thread yields one ambiguous write
+  per ~5 s of total outage — the invocation timeout — no matter the
+  rate); the 0.5 rate makes the 300-op budget span the full 300 s
+  instead of exhausting before the first outage."
   [opts]
   (let [sustained? (or (= "membership-snapshot-churn" (:nemesis opts))
                        (= "counter" (:workload opts)))
@@ -262,7 +277,8 @@
         (update :rate        #(or % (cond sustained? 1.4
                                           drop-all?  0.5
                                           :else      10.0)))
-        (update :ops-per-key #(or % (if sustained? 800 300))))))
+        (update :ops-per-key #(or % (if sustained? 800 300)))
+        (update :key-count   #(or % (if drop-all? 10 5))))))
 
 (defn ratis-test
   "Builds the test map from parsed CLI options: register workload +

@@ -407,11 +407,11 @@
    {:type :info, :f :unsync-restart}])
 
 (def unsync-drop-all-segment-shape
-  ;; calm 50: pinned by the knossos :info budget, not politeness — see
-  ;; nemesis/unsync-drop-all-cycle.
-  [{:type :sleep, :value 50}
+  ;; calm 70 / window 5: pinned by the knossos :info budget, not
+  ;; politeness — see nemesis/unsync-drop-all-cycle.
+  [{:type :sleep, :value 70}
    {:type :info, :f :unsync-drop-all}
-   {:type :sleep, :value 10}
+   {:type :sleep, :value 5}
    {:type :info, :f :unsync-restart-all}])
 
 (deftest durability-segment-shapes
@@ -449,7 +449,8 @@
       (is (empty? (set/intersection durability-fs fs))))))
 
 (deftest torn-write-fault-parameters
-  (testing "the tear splits into 3 parts persisting only the head, and
-            fires within a few appends of arming"
+  (testing "the tear splits into 3 parts and by default persists the
+            head (the sequential-power-loss shape; --torn-persist-part
+            2 selects the refusal-biased hole shape)"
     (is (= 3 nemesis/torn-parts))
-    (is (= 3 nemesis/torn-occurrence))))
+    (is (= 1 nemesis/default-torn-persist-part))))

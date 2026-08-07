@@ -259,19 +259,23 @@
   {:calm-s 20 :fault-s 10})
 
 (def unsync-drop-all-cycle
-  "The whole-cluster power-loss cycle (Job 11): calm 50 s; kill -9 EVERY
-  voter and drop every cache; down 10 s; restart all. Pinned. The calm
-  stretch is sized by the knossos budget, not politeness: every write
-  invoked during a total outage ends :info (honestly ambiguous — the
-  dead leader may have appended it) and each stays forever-concurrent in
-  the linear checker, so windows/run × in-flight/window is a hard
-  analysis budget. The first shakedown at calm 25 s produced 8 windows,
-  135 :info and an :out-of-memory :unknown on every key (store
-  ratis-kv-register-unsync-drop-all/20260807T095908.783Z, preserved);
-  calm 50 s (4–5 windows) with the kind's 0.5 rate default
-  (core/workload-defaults) keeps per-key :info near the M0-proven
-  ~12."
-  {:calm-s 50 :fault-s 10})
+  "The whole-cluster power-loss cycle (Job 11): calm 70 s; kill -9 EVERY
+  voter and drop every cache; 5 s of dead air; restart all. Pinned, and
+  sized by the knossos budget, not politeness: every write invoked
+  during a total outage ends :info (honestly ambiguous — the dead
+  leader may have appended it and it can commit after restart), each
+  :info stays forever-concurrent in the linear checker, and a thread
+  produces one such write per ~5 s of outage (the invocation timeout)
+  REGARDLESS of rate — so per-key :info mass = windows × outage-seconds
+  / timeout × threads-per-key. Two shakedowns OOMed analysis on every
+  key before this shape (8 windows/135 :info at calm 25, 4 windows/
+  18–24 per key at calm 50 with 2 threads/key; stores
+  …unsync-drop-all/20260807T095908.783Z and …T101150.734Z, preserved).
+  calm 70 + window 5 (3 losses/300 s — the drop is instantaneous at
+  kill time, dead air proves nothing) with the kind's key-count 10
+  default (1 thread/key — core/workload-defaults) lands ~5 :info/key,
+  well inside the M0-proven budget."
+  {:calm-s 70 :fault-s 5})
 
 (def torn-write-cycle
   "The torn-write script (Job 11): 30 s of calm writes so the victim's
@@ -554,16 +558,18 @@
                         (catch Exception _ ""))}))))
 
 (def torn-parts
-  "How many equal parts the torn write is split into (only part 1
-  persists — the head of the write survives, the tail dies with the
-  cache)."
+  "How many equal parts the torn write is split into (exactly one part
+  persists; which one is --torn-persist-part)."
   3)
 
-(def torn-occurrence
-  "Which write to the armed segment file gets torn, counted from
-  arming. Small, so the fire lands within the next few appends while
-  the workload keeps writing."
-  3)
+(def default-torn-persist-part
+  "Which third of the torn write reaches the backing store when the CLI
+  does not say: part 1 — the head survives, the tail dies with the
+  cache, the truest sequential-power-loss shape. Part 2 instead leaves
+  a zero hole before surviving bytes, which biases recovery toward the
+  loud CorruptionPolicy=EXCEPTION refusal arm (both are legal recorded
+  outcomes; see db/torn-write-command)."
+  1)
 
 (defn durability-nemesis
   "Routes the durability fs. :unsync-drop / :unsync-drop-all kill and
@@ -607,11 +613,14 @@
                 followers (or (seq (remove (set leaders) nodes)) nodes)
                 target    (rand-nth (vec followers))
                 _         (reset! victim target)
+                persist-part (long (:torn-persist-part test
+                                                      default-torn-persist-part))
                 result    (-> (c/on-nodes test [target]
                                           (fn [_t _n]
                                             (if-let [seg (db/current-open-segment!)]
                                               {:segment seg
-                                               :armed   (db/torn-write! seg torn-parts torn-occurrence)}
+                                               :persist-part persist-part
+                                               :armed   (db/torn-write! seg torn-parts persist-part)}
                                               {:armed :no-open-segment})))
                               (get target))]
             (assoc op :value (assoc result :victim target)))
