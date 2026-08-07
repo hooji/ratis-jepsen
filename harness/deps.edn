@@ -28,6 +28,14 @@
   ;; absence is a hard ExceptionInInitializerError, not a no-op —
   ;; ratis-client pulls neither transitively (both found the hard way in
   ;; Job 04's first cluster runs).
+  ;;
+  ;; Version matrix (Job 12): these pins are the DEFAULT. A --ratis-version
+  ;; run must match the harness client to the server under test, which
+  ;; env/run.sh does at launch via -Sdeps {:aliases {:sut-ratis
+  ;; {:override-deps {...}}}} over these three coordinates (deps.edn is
+  ;; static — JVM deps cannot change after start, so the flag's owner is
+  ;; the launcher, not the CLI). core.clj's check-client-version! then
+  ;; refuses to run if the real classpath disagrees with the flag.
   org.apache.ratis/ratis-client {:mvn/version "3.2.2"}
   org.apache.ratis/ratis-grpc {:mvn/version "3.2.2"}
   org.apache.ratis/ratis-metrics-default {:mvn/version "3.2.2"}}

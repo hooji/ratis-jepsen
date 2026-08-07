@@ -41,7 +41,8 @@ on:
           for those kinds) and cost extra runner time: the image build
           compiles lazyfs (~2–3 min, every job pays it since each runner
           builds the image) and each durability run adds mount setup on
-          all five nodes.
+          all five nodes. Mixed-version tokens (Job 12, M5; need the
+          mixed-version input): mv-partition, mv-crash, rolling-upgrade.
         type: string
         required: false
         default: none,partition,crash,pause,mixed,snapshot-churn,transfer,membership,membership-snapshot-churn,mixed-all,counter-crash
@@ -50,6 +51,33 @@ on:
         type: string
         required: false
         default: '300'
+      ratis-version:
+        description: >-
+          The Ratis version under test (Job 12): the SUT tarball is built
+          at it and every non-mixed scenario runs against it, with the
+          harness's own ratis-client matched by env/run.sh.
+        type: string
+        required: false
+        default: '3.2.2'
+      mixed-version:
+        description: >-
+          OLD,NEW version pair for the mixed-version tokens (mv-partition,
+          mv-crash, rolling-upgrade), e.g. 3.2.2,3.3.0. Empty (default)
+          disables those tokens; both versions' tarballs are built when
+          set. Non-mixed scenarios ignore it.
+        type: string
+        required: false
+        default: ''
+      ratis-repo-url:
+        description: >-
+          Extra Maven repository URL for Ratis versions not (yet) on
+          Central — e.g. https://repository.apache.org/content/
+          repositories/orgapacheratis-NNNN/ while a release candidate is
+          under vote. Applied to the SUT build and the harness resolution
+          (RJ_RATIS_REPO_URL). Empty (default): Central only.
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -66,18 +94,26 @@ jobs:
     outputs:
       scenarios: ${{ steps.parse.outputs.scenarios }}
       time-limit: ${{ steps.parse.outputs.time-limit }}
+      ratis-version: ${{ steps.parse.outputs.ratis-version }}
+      mixed-version: ${{ steps.parse.outputs.mixed-version }}
     steps:
       # Validate inputs and turn the comma-list into a JSON array for the
       # test matrix. Blank entries are dropped, duplicates collapsed (a
       # duplicate scenario would collide on the store artifact name); an
       # effectively empty list falls back to the documented default, as
       # does an empty time-limit — downstream jobs consume the normalized
-      # values from this job's outputs, never the raw inputs.
+      # values from this job's outputs, never the raw inputs. Version
+      # inputs (Job 12) are validated as plain tokens because they are
+      # spliced into build commands and harness flags; mixed-version
+      # tokens without a mixed-version input fail here, before any
+      # runner spends an hour discovering it.
       - name: Parse the scenarios input
         id: parse
         env:
           SCENARIOS: ${{ inputs.scenarios }}
           TIME_LIMIT: ${{ inputs.time-limit }}
+          RATIS_VERSION: ${{ inputs.ratis-version }}
+          MIXED_VERSION: ${{ inputs.mixed-version }}
         run: |
           if [ -z "${TIME_LIMIT}" ]; then
             TIME_LIMIT=300
@@ -88,6 +124,16 @@ jobs:
               echo "::error::time-limit must be a positive integer, got '${TIME_LIMIT}'"
               exit 1 ;;
           esac
+          RATIS_VERSION="${RATIS_VERSION:-3.2.2}"
+          if ! echo "${RATIS_VERSION}" | grep -Eq '^[0-9A-Za-z._-]+$'; then
+            echo "::error::ratis-version must be a plain version token, got '${RATIS_VERSION}'"
+            exit 1
+          fi
+          if [ -n "${MIXED_VERSION}" ] \
+             && ! echo "${MIXED_VERSION}" | grep -Eq '^[0-9A-Za-z._-]+,[0-9A-Za-z._-]+$'; then
+            echo "::error::mixed-version must be OLD,NEW (two version tokens), got '${MIXED_VERSION}'"
+            exit 1
+          fi
           list=$(jq -cn 'env.SCENARIOS | split(",")
                          | map(gsub("^\\s+|\\s+$"; ""))
                          | map(select(length > 0)) | unique')
@@ -95,9 +141,17 @@ jobs:
             list='["none","partition"]'
             echo "scenarios input was empty; using the default"
           fi
+          if [ -z "${MIXED_VERSION}" ] \
+             && echo "${list}" | jq -e 'map(select(test("^mv-|^rolling-upgrade$"))) | length > 0' >/dev/null; then
+            echo "::error::scenarios include a mixed-version token but the mixed-version input is empty"
+            exit 1
+          fi
           echo "scenarios=${list}" >> "${GITHUB_OUTPUT}"
           echo "time-limit=${TIME_LIMIT}" >> "${GITHUB_OUTPUT}"
-          echo "matrix scenarios: ${list}; time limit: ${TIME_LIMIT}s"
+          echo "ratis-version=${RATIS_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "mixed-version=${MIXED_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "matrix scenarios: ${list}; time limit: ${TIME_LIMIT}s;" \
+               "ratis ${RATIS_VERSION}; mixed '${MIXED_VERSION:-—}'"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
@@ -106,10 +160,28 @@ jobs:
           cache: maven
           cache-dependency-path: sut/ratis-kv/pom.xml
       # Module path on purpose — there is no repo-root Maven wrapper
-      # (BACKLOG item 6).
-      - name: Build the SUT tarball
-        run: sut/ratis-kv/mvnw -f sut/ratis-kv/pom.xml -q package
-      - name: Upload the SUT tarball
+      # (BACKLOG item 6). One tarball per distinct version this dispatch
+      # needs: ratis-version plus, when set, both halves of mixed-version
+      # (each lands as ratis-kv-*-ratis-<v>.tar.gz; the harness selects
+      # by version). ratis-repo-url reaches the build as -Dratis.repo.url
+      # (the pom's extra-ratis-repo profile) for versions not on Central.
+      - name: Build the SUT tarball(s)
+        env:
+          RATIS_VERSION: ${{ steps.parse.outputs.ratis-version }}
+          MIXED_VERSION: ${{ steps.parse.outputs.mixed-version }}
+          RATIS_REPO_URL: ${{ inputs.ratis-repo-url }}
+        run: |
+          versions=$(printf '%s\n%s\n' "${RATIS_VERSION}" \
+                       "$(echo "${MIXED_VERSION}" | tr ',' '\n')" \
+                     | sed '/^$/d' | sort -u)
+          for v in ${versions}; do
+            echo "building the SUT tarball at ratis ${v}"
+            sut/ratis-kv/mvnw -f sut/ratis-kv/pom.xml -q package \
+              "-Dratis.version=${v}" \
+              ${RATIS_REPO_URL:+"-Dratis.repo.url=${RATIS_REPO_URL}"}
+          done
+          ls -l sut/ratis-kv/target/ratis-kv-*.tar.gz
+      - name: Upload the SUT tarball(s)
         uses: actions/upload-artifact@v4
         with:
           name: sut-tarball
@@ -140,19 +212,33 @@ jobs:
         run: env/run.sh up
       # The harness exit code is the verdict (0 = checker valid) and,
       # uncaught, becomes the step's. counter-<kind> tokens (Job 09)
-      # translate to the M3 counter workload under that nemesis; bare
-      # tokens keep the register workload, unchanged.
+      # translate to the M3 counter workload under that nemesis; mv-<kind>
+      # and rolling-upgrade tokens (Job 12) run the register workload on
+      # the mixed-version topology; bare tokens keep the register
+      # workload at the dispatched ratis-version. RJ_RATIS_REPO_URL lets
+      # run.sh build/resolve staged versions inside control.
       - name: Run the harness (scenario ${{ matrix.scenario }})
         env:
           SCENARIO: ${{ matrix.scenario }}
           TIME_LIMIT: ${{ needs.build-sut.outputs.time-limit }}
+          RATIS_VERSION: ${{ needs.build-sut.outputs.ratis-version }}
+          MIXED_VERSION: ${{ needs.build-sut.outputs.mixed-version }}
+          RJ_RATIS_REPO_URL: ${{ inputs.ratis-repo-url }}
         run: |
           case "${SCENARIO}" in
             counter-*)
               env/run.sh test --workload counter \
-                --nemesis "${SCENARIO#counter-}" --time-limit "${TIME_LIMIT}" ;;
+                --nemesis "${SCENARIO#counter-}" --time-limit "${TIME_LIMIT}" \
+                --ratis-version "${RATIS_VERSION}" ;;
+            mv-*)
+              env/run.sh test --nemesis "${SCENARIO#mv-}" \
+                --mixed-version "${MIXED_VERSION}" --time-limit "${TIME_LIMIT}" ;;
+            rolling-upgrade)
+              env/run.sh test --nemesis rolling-upgrade \
+                --mixed-version "${MIXED_VERSION}" --time-limit "${TIME_LIMIT}" ;;
             *)
-              env/run.sh test --nemesis "${SCENARIO}" --time-limit "${TIME_LIMIT}" ;;
+              env/run.sh test --nemesis "${SCENARIO}" --time-limit "${TIME_LIMIT}" \
+                --ratis-version "${RATIS_VERSION}" ;;
           esac
       # store/ is written by root inside the container; tar as root rather
       # than fight ownership on the runner.
@@ -193,9 +279,13 @@ jobs:
       - name: Bring the topology up
         run: env/run.sh up
       - name: Seeded run — passes iff the harness fails
+        env:
+          RATIS_VERSION: ${{ needs.build-sut.outputs.ratis-version }}
+          RJ_RATIS_REPO_URL: ${{ inputs.ratis-repo-url }}
         run: |
           rc=0
           env/run.sh test --nemesis partition --time-limit 120 \
+            --ratis-version "${RATIS_VERSION}" \
             --seed-bug stale-reads || rc=$?
           echo "red-gate: harness exit code ${rc}"
           if [ "${rc}" -eq 0 ]; then

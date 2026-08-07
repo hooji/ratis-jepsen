@@ -25,6 +25,11 @@
 #   RJ_EXTRA_CA_BUNDLE     path to a PEM CA bundle to trust inside the image
 #                          (TLS-inspecting proxies; see README.md)
 #   RJ_DOCKER_BUILD_ARGS   extra args appended verbatim to `docker build`
+#   RJ_RATIS_REPO_URL      extra Maven repository for Ratis artifacts not on
+#                          Central (e.g. an Apache staging repo while a
+#                          release candidate is under vote): passed to the
+#                          SUT build as -Dratis.repo.url and injected into
+#                          the harness's dependency resolution (Job 12)
 set -euo pipefail
 
 ENV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -138,16 +143,68 @@ cmd_down() {
 # (clojure -M:run test ... on the control node; DESIGN 3). Keep the
 # subcommand plumbing; change only what is between the markers.
 # ---------------------------------------------------------------------------
+# The Ratis version(s) a `test` invocation runs against (Job 12, M5):
+# --ratis-version V selects the SUT tarball AND the harness's own
+# ratis-client deps; --mixed-version OLD,NEW needs both versions' tarballs
+# and puts the harness client on OLD (clients upgrade last). Versions are
+# validated here because they are spliced into shell and edn strings.
+RATIS_VERSION_DEFAULT="3.2.2"
+VERSION_TOKEN_RE='^[0-9A-Za-z._-]+$'
+
+# Scans pass-through harness args for --ratis-version/--mixed-version
+# (both stay in the pass-through — the harness needs them too) and sets
+# TEST_VERSIONS (space-separated, tarballs to ensure) and CLIENT_VERSION
+# (the harness JVM's ratis-client).
+parse_test_versions() {
+  local ratis_version="" mixed="" i args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[i]}" in
+      --ratis-version) ratis_version="${args[i + 1]:-}" ;;
+      --mixed-version) mixed="${args[i + 1]:-}" ;;
+    esac
+  done
+  ratis_version="${ratis_version:-${RATIS_VERSION_DEFAULT}}"
+  if [[ ! "${ratis_version}" =~ ${VERSION_TOKEN_RE} ]]; then
+    echo "run.sh: ERROR: --ratis-version '${ratis_version}' is not a plain version token" >&2
+    exit 2
+  fi
+  if [[ -n "${mixed}" ]]; then
+    local old="${mixed%%,*}" new="${mixed#*,}"
+    if [[ "${mixed}" != *,* || ! "${old}" =~ ${VERSION_TOKEN_RE} \
+          || ! "${new}" =~ ${VERSION_TOKEN_RE} || "${old}" == "${new}" ]]; then
+      echo "run.sh: ERROR: --mixed-version '${mixed}' must be OLD,NEW (two distinct version tokens)" >&2
+      exit 2
+    fi
+    TEST_VERSIONS="${old} ${new}"
+    CLIENT_VERSION="${old}"
+  else
+    TEST_VERSIONS="${ratis_version}"
+    CLIENT_VERSION="${ratis_version}"
+  fi
+}
+
+# Ensures the SUT tarball for one Ratis version exists (build inside
+# control if absent); the repo is bind-mounted at /ratis-jepsen, so a
+# host-built tarball counts.
+ensure_tarball() {
+  local version=$1
+  if ! compose exec -T control bash -c \
+      "ls /ratis-jepsen/sut/ratis-kv/target/ratis-kv-*-ratis-${version}.tar.gz >/dev/null 2>&1"; then
+    echo "run.sh: no SUT tarball for ratis ${version}; building inside control"
+    compose exec -T control /ratis-jepsen/sut/ratis-kv/mvnw \
+      -f /ratis-jepsen/sut/ratis-kv/pom.xml -q package \
+      "-Dratis.version=${version}" \
+      ${RJ_RATIS_REPO_URL:+"-Dratis.repo.url=${RJ_RATIS_REPO_URL}"}
+  fi
+}
+
 cmd_test() {
   # BEGIN Job-04 test body
-  # Ensure the SUT tarball exists (build inside control if absent); the
-  # repo is bind-mounted at /ratis-jepsen, so a host-built tarball counts.
-  if ! compose exec -T control bash -c \
-      "ls /ratis-jepsen/sut/ratis-kv/target/ratis-kv-*.tar.gz >/dev/null 2>&1"; then
-    echo "run.sh: no SUT tarball; building inside control"
-    compose exec -T control /ratis-jepsen/sut/ratis-kv/mvnw \
-      -f /ratis-jepsen/sut/ratis-kv/pom.xml -q package
-  fi
+  parse_test_versions "$@"
+  local version
+  for version in ${TEST_VERSIONS}; do
+    ensure_tarball "${version}"
+  done
   # jepsen's run! shells out to `git` for provenance logging and dies if
   # the binary is missing outright (it handles nonzero exits fine); the
   # image ships no git, so give control a benign always-fails stand-in.
@@ -185,12 +242,32 @@ SHIM
   # `down`. Remaining args pass through to the harness CLI (--nemesis,
   # --time-limit, --seed-bug, ...). The harness exit code is the test
   # verdict (0 = checker valid) and, via `set -e`, becomes ours.
+  #
+  # Version matrix (Job 12): the harness JVM's own ratis-client/-grpc/
+  # -metrics-default must match the server under test (the mixed pair's
+  # OLD half on mixed runs — clients upgrade last), so the deps are
+  # overridden at launch via -Sdeps :override-deps from CLIENT_VERSION;
+  # core.clj re-checks the real classpath and refuses on skew. With
+  # RJ_RATIS_REPO_URL set, the same -Sdeps adds the extra repository so
+  # staged (RC) artifacts resolve inside control.
+  local sdeps="{"
+  if [[ -n "${RJ_RATIS_REPO_URL:-}" ]]; then
+    if [[ ! "${RJ_RATIS_REPO_URL}" =~ ^https?://[^[:space:]\"\{\}]+$ ]]; then
+      echo "run.sh: ERROR: RJ_RATIS_REPO_URL '${RJ_RATIS_REPO_URL}' is not a plain http(s) URL" >&2
+      exit 2
+    fi
+    sdeps+=":mvn/repos {\"extra-ratis-repo\" {:url \"${RJ_RATIS_REPO_URL}\"}} "
+  fi
+  sdeps+=":aliases {:sut-ratis {:override-deps {"
+  sdeps+="org.apache.ratis/ratis-client {:mvn/version \"${CLIENT_VERSION}\"} "
+  sdeps+="org.apache.ratis/ratis-grpc {:mvn/version \"${CLIENT_VERSION}\"} "
+  sdeps+="org.apache.ratis/ratis-metrics-default {:mvn/version \"${CLIENT_VERSION}\"}}}}}"
   compose exec -T control bash -c \
-    'cd /ratis-jepsen/harness && exec clojure -M:run test \
+    'cd /ratis-jepsen/harness && exec clojure -Sdeps "$1" -M:run:sut-ratis test \
        --store-dir /ratis-jepsen/store \
        --nodes n1,n2,n3,n4,n5 \
        --ssh-private-key /root/.ssh/id_ed25519 \
-       "$@"' harness-test "$@"
+       "${@:2}"' harness-test "${sdeps}" "$@"
   # END Job-04 test body
 }
 

@@ -14,9 +14,10 @@
 
 (ns ratis-jepsen.nemesis
   "Fault schedules (Job 05 M1 + Job 07 M2 part 1 + Job 08 M2 part 2 +
-  Job 11 M4): none | partition | crash | pause | mixed | snapshot-churn |
-  transfer | membership | membership-snapshot-churn | listener-probe |
-  quorum-pause | mixed-all | unsync-drop | unsync-drop-all | torn-write.
+  Job 11 M4 + Job 12 M5): none | partition | crash | pause | mixed |
+  snapshot-churn | transfer | membership | membership-snapshot-churn |
+  listener-probe | quorum-pause | mixed-all | unsync-drop |
+  unsync-drop-all | torn-write | rolling-upgrade.
 
   Vocabulary — every nemesis op :f is unique across fault kinds, so one
   composed nemesis routes ops in every mode and history event names never
@@ -126,6 +127,16 @@
                            it would walk the cluster below its majority
                            and convict Ratis for our own fault schedule
 
+  Rolling upgrade (Job 12, M5 — mixed-version topology):
+
+    :roll                  ACTION: move the next still-old voter to the
+                           mixed-version pair's new version — kill -9,
+                           flip the install symlink, restart on the same
+                           storage (RECOVER), await a NEW startup line —
+                           one node per op, contract node order. The op
+                           blocks through the node's downtime (a
+                           minority throughout), so no heal op exists.
+
   Each kind's schedule is a self-contained *segment* — calm sleep, then
   fault/action ops, ending healed — so a run is a concatenation of
   segments that always starts calm and always heals one fault before the
@@ -165,7 +176,8 @@
   #{"none" "partition" "crash" "pause" "mixed"
     "snapshot-churn" "transfer" "membership" "membership-snapshot-churn"
     "listener-probe" "quorum-pause" "mixed-all"
-    "unsync-drop" "unsync-drop-all" "torn-write"})
+    "unsync-drop" "unsync-drop-all" "torn-write"
+    "rolling-upgrade"})
 
 (def durability-kinds
   "The fault schedules that inject storage-durability faults through
@@ -199,11 +211,15 @@
   they never enter fault->heal and the liveness checker ignores them.
   Membership adds/removes qualify: the conf change itself keeps a
   healthy majority throughout (staged catch-up is leader-side
-  background; a removed node leaves a full-capacity smaller conf)."
+  background; a removed node leaves a full-capacity smaller conf).
+  :roll (Job 12's rolling upgrade) qualifies the same way: one voter is
+  down for the seconds of its kill→switch-version→restart move — a
+  minority throughout, and the op itself blocks until the node's new
+  startup line, so no separate heal exists."
   #{:churn-transfer :churn-snapshot :transfer
     :member-add :member-remove
     :listener-add :listener-census :listener-promote :listener-demote
-    :listener-remove})
+    :listener-remove :roll})
 
 ;; ---------------------------------------------------------------------------
 ;; Cycles (seconds). Calm first: runs open with a calm window (Job 04
@@ -291,6 +307,15 @@
   the ns docstring."
   {:calm-s 30 :fault-s 10})
 
+(def default-rolling-cycle
+  "The rolling-upgrade script (Job 12): 30 s of calm all-old-version
+  traffic first (the pre-upgrade baseline), then one voter rolled at a
+  time — kill, flip the version symlink, restart, await the new startup
+  line — with 25 s between rolls for the returner to catch up and any
+  deposed leadership to settle. 30 + 5×(roll ≈5–15 s + 25 s) fits a
+  300 s run with slack; both knobs are CLI-overridable."
+  {:calm-s 30 :gap-s 25})
+
 (defn cycles
   "The per-kind cycles for a run: partition pinned (Job 04), the rest
   from the parsed CLI options where present, brief defaults where not."
@@ -316,7 +341,9 @@
                          (:calm-s default-membership-cycle))
                 :replace-dead-s
                 (:membership-replace-dead-s opts
-                 (:replace-dead-s default-membership-cycle))}})
+                 (:replace-dead-s default-membership-cycle))}
+   :rolling   {:calm-s (:roll-calm-s opts (:calm-s default-rolling-cycle))
+               :gap-s  (:roll-gap-s opts (:gap-s default-rolling-cycle))}})
 
 ;; ---------------------------------------------------------------------------
 ;; Membership state (Job 08). One atom, created by core.clj and carried in
@@ -695,6 +722,83 @@
                          (assoc :victim target)))))))
 
       (teardown! [_this _test]))))
+
+;; ---------------------------------------------------------------------------
+;; Rolling upgrade (Job 12, M5). One :roll op = one voter moved from the
+;; mixed-version pair's old version to its new one: kill -9, flip the
+;; node's install symlink (db/switch-version!), restart through the
+;; ordinary db start path (RECOVER on the same storage — the new version
+;; opens the old version's raft log), and await a NEW contract startup
+;; line. The workload runs throughout; the script rolls every voter once,
+;; oldest-assignment first in contract node order, so the run traverses
+;; every intermediate mix from 5-old to 5-new.
+;; ---------------------------------------------------------------------------
+
+(def roll-await-ms
+  "How long a roll waits for the restarted node's new startup line
+  before recording :no-new-startup-line (the evidence checker fails a
+  dedicated rolling run on it; generous — restart on recovered storage
+  takes single-digit seconds)."
+  30000)
+
+(defn- await-roll!
+  "Waits for a NEW contract startup line past `before-count`, or records
+  the failure with a log tail. Runs inside the roll target's session."
+  [before-count]
+  (let [deadline (+ (System/nanoTime) (* roll-await-ms 1000000))]
+    (loop []
+      (cond
+        (> (startup-lines!) before-count)
+        {:await :started}
+
+        (< (System/nanoTime) deadline)
+        (do (Thread/sleep 500) (recur))
+
+        :else
+        {:await    :no-new-startup-line
+         :log-tail (try (c/exec :bash :-c (str "tail -n 4 " env/log-file
+                                               " 2>/dev/null || true"))
+                        (catch Exception _ ""))}))))
+
+(defn roll-target
+  "The next node to roll: the first (contract node order) whose current
+  version is still `old`. Pure; nil when everything already rolled."
+  [version-of nodes old]
+  (first (filter #(= old (version-of %)) nodes)))
+
+(defn rolling-nemesis
+  "Responds to :roll by upgrading the next still-old voter to the mixed
+  pair's new version (kill → switch-version! → start → await new startup
+  line), updating the shared :version-state atom so the next :roll moves
+  on. A :roll after every voter rolled records a skip (legal — generous
+  time limits emit more ops than voters)."
+  []
+  (reify jn/Nemesis
+    (setup! [this _test] this)
+
+    (invoke! [_this test op]
+      (let [vstate    (:version-state test)
+            [old new] (:mixed-versions test)]
+        (assert (and vstate old new)
+                ":roll needs :version-state and :mixed-versions in the test map")
+        (if-let [target (roll-target @vstate (vec (:nodes test)) old)]
+          (let [result (-> (c/on-nodes test [target]
+                                       (fn [t n]
+                                         (jdb/kill! (:db t) t n)
+                                         (db/switch-version! new)
+                                         (let [before (startup-lines!)]
+                                           (jdb/start! (:db t) t n)
+                                           (assoc (await-roll! before)
+                                                  :active (db/active-version!)))))
+                           (get target))]
+            (when (= :started (:await result))
+              (swap! vstate assoc target new))
+            (assoc op :value (merge {:node target :from old :to new}
+                                    result
+                                    {:versions-now @vstate})))
+          (assoc op :value {:skip :all-rolled, :versions-now @vstate}))))
+
+    (teardown! [_this _test])))
 
 (defn churn-nemesis
   "The snapshot-churn nemesis (Job 07): :churn-kill kills one follower
@@ -1211,6 +1315,7 @@
                #{:unsync-drop :unsync-restart :unsync-drop-all
                  :unsync-restart-all :torn-write :torn-restart}
                (durability-nemesis)
+               #{:roll}           (rolling-nemesis)
                #{:member-add :member-remove :member-replace-dead
                  :member-replace-done :listener-add :listener-census
                  :listener-promote :listener-demote :listener-remove}
@@ -1351,6 +1456,20 @@
    (gen/sleep 3)  {:type :info, :f :listener-demote}
    (gen/sleep 12) {:type :info, :f :listener-remove}])
 
+(defn rolling-upgrade-script
+  "The rolling upgrade (Job 12), scripted once per run: calm all-old
+  traffic, then one :roll per initial voter with a settle gap after
+  each. Target selection happens inside the nemesis at invocation time
+  (first still-old voter in contract order), so the ops carry no
+  :value. Finite: after the last roll the whole group runs the new
+  version and the workload continues calm to the time limit."
+  [cycles]
+  (into [(gen/sleep (get-in cycles [:rolling :calm-s]))]
+        (mapcat (fn [_voter]
+                  [{:type :info, :f :roll}
+                   (gen/sleep (get-in cycles [:rolling :gap-s]))])
+                env/initial-voters)))
+
 (defn- interleave-generator
   "An infinite random concatenation of whole segments drawn uniformly
   from `segment-fns` — the roughly-equal-weight interleave. Because
@@ -1439,5 +1558,7 @@
                           :generator (cycle (unsync-drop-all-segment cs))}
        "torn-write"     {:nemesis   (full-nemesis)
                          :generator torn-write-script}
+       "rolling-upgrade" {:nemesis   (full-nemesis)
+                          :generator (rolling-upgrade-script cs)}
        "mixed-all"      {:nemesis   (full-nemesis)
                          :generator (mixed-all-generator cs)}))))
