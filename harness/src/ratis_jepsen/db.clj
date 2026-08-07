@@ -511,13 +511,18 @@
   open segment exists yet.
 
   Staleness note: segments roll (log_inprogress_N → log_N-M + a new
-  log_inprogress_M+1) at 8 MB or on a TERM CHANGE (Job 07's
-  source-verified rule), so an armed path goes stale if an election
-  lands between discovery and the tear. The torn-write schedule keeps
-  that window sub-second with no other fault running; if durability
-  kinds are ever composed with election-causing faults, the
-  never-fired tear shows up as a loud :no-durability-fault-evidence
-  red, never a silent green."
+  log_inprogress_M+1) at 8 MB, on a TERM CHANGE (Job 07's
+  source-verified rule) — and on EVERY SUT restart: reopening the log
+  rolls the recovered in-progress segment to a closed name (the Job 10
+  spike's logs show log_inprogress_0 → log_0-10 + log_inprogress_11
+  across one restart). Restarts being this harness's most common event
+  is exactly why this discovery runs fresh inside every arm and its
+  result is never reused across ops. The exposed window is only
+  between arming and the tear: sub-second in the shipped schedule with
+  no other fault running. Any restart or election landing inside it
+  stales the armed path; the never-fired tear then shows up as a loud
+  :no-durability-fault-evidence red carrying the :torn-restart op's
+  armed-vs-now segment forensics, never a silent green."
   []
   (let [out (try (c/exec :bash :-c
                          (str "find " env/storage-dir

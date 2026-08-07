@@ -104,17 +104,23 @@
                            like any other window
     :torn-write / :torn-restart
                            lazyfs torn-op on one follower's current open
-                           log segment: the next writes to it are
-                           counted and the occurrence-th is split, only
-                           its first part reaching the backing store,
-                           then lazyfs SIGKILLs itself — a power loss
-                           mid-write, torn at page granularity. The heal
-                           kills the SUT, remounts lazyfs over the torn
-                           backing store (re-proving the mount) and
-                           restarts: the node must either recover
+                           log segment, re-discovered at arm time (never
+                           cached: Ratis rolls the open segment on EVERY
+                           restart, not just term change/8 MB — see
+                           db/current-open-segment!): the NEXT write to
+                           it is split into parts of which exactly one
+                           (--torn-persist-part) reaches the backing
+                           store, then lazyfs SIGKILLs itself — a power
+                           loss mid-write, torn at sub-page granularity.
+                           The heal kills the SUT, remounts lazyfs over
+                           the torn backing store (re-proving the mount)
+                           and restarts: the node must either recover
                            cleanly or refuse loudly (CorruptionPolicy
                            EXCEPTION is the default); either outcome is
                            recorded, a refusal does NOT fail the heal.
+                           A tear that never fired records armed-vs-now
+                           segment forensics in the heal op, so a stale
+                           armed path is diagnosable from the history.
                            Scripted ONCE per run: each tear may legally
                            cost a node until the run ends, so repeating
                            it would walk the cluster below its majority
@@ -576,11 +582,17 @@
   cache-drop a minority / every voter (per-node results recorded; a
   :send-failed drop is visible in the op AND in the evidence checker,
   which fails a dedicated run that never dropped anything).
-  :torn-write arms lazyfs's torn-op on one follower's open segment;
+  :torn-write arms lazyfs's torn-op on one follower's open segment
+  (re-discovered at arm time — segments roll on every restart);
   :torn-restart re-collects the evidence, remounts the torn store and
   restarts the victim, recording :started / :refused-start / :wedged as
-  a legal experiment outcome. Victim rides an atom between the
-  segment's ops (segments are atomic in every mode)."
+  a legal experiment outcome. A tear that never fired additionally
+  records :armed-segment / :open-segment-now / :armed-path-stale? —
+  taken through the still-live mount BEFORE the kill — so an armed
+  path staled by a segment roll convicts itself in the history instead
+  of demanding lazyfs-log spelunking. Victim (node + armed segment)
+  rides an atom between the segment's ops (segments are atomic in
+  every mode)."
   []
   (let [victim (atom nil)]
     (reify jn/Nemesis
@@ -612,7 +624,7 @@
                                  []))
                 followers (or (seq (remove (set leaders) nodes)) nodes)
                 target    (rand-nth (vec followers))
-                _         (reset! victim target)
+                _         (reset! victim {:node target})
                 persist-part (long (:torn-persist-part test
                                                       default-torn-persist-part))
                 result    (-> (c/on-nodes test [target]
@@ -623,10 +635,11 @@
                                                :armed   (db/torn-write! seg torn-parts persist-part)}
                                               {:armed :no-open-segment})))
                               (get target))]
+            (swap! victim assoc :segment (:segment result))
             (assoc op :value (assoc result :victim target)))
 
           :torn-restart
-          (let [target @victim]
+          (let [{target :node armed-seg :segment} @victim]
             (reset! victim nil)
             (if-not target
               (assoc op :value {:skip :no-victim})
@@ -634,6 +647,24 @@
                      (-> (c/on-nodes test [target]
                                      (fn [t n]
                                        (let [fired? (db/torn-write-fired?)
+                                             ;; armed-but-never-fired: lazyfs
+                                             ;; is still alive, so census the
+                                             ;; open segment through the live
+                                             ;; mount (a read — torn-op only
+                                             ;; triggers on writes) before
+                                             ;; the kill: armed ≠ now means
+                                             ;; the path went stale under the
+                                             ;; arm (segments roll on every
+                                             ;; restart / term change / 8 MB)
+                                             forensics
+                                             (when-not fired?
+                                               (let [now (db/current-open-segment!)]
+                                                 {:armed-segment    armed-seg
+                                                  :open-segment-now now
+                                                  :armed-path-stale?
+                                                  (boolean (and armed-seg now
+                                                                (not= armed-seg
+                                                                      now)))}))
                                              _      (jdb/kill! (:db t) t n)
                                              ;; remount even when the fault
                                              ;; never fired: a fresh lazyfs
@@ -646,17 +677,20 @@
                                                   (catch Exception e
                                                     {:proven false
                                                      :error  (.getMessage e)}))]
-                                         (if-not (:proven remount)
-                                           ;; do NOT restart onto an unproven
-                                           ;; store — record it; the evidence
-                                           ;; checker fails the run
-                                           {:outcome :remount-unproven
-                                            :error   (:error remount)
-                                            :fired   fired?}
-                                           (let [before (startup-lines!)]
-                                             (jdb/start! (:db t) t n)
-                                             (assoc (await-start-or-refusal! before)
-                                                    :fired fired?))))))
+                                         (merge
+                                           (if-not (:proven remount)
+                                             ;; do NOT restart onto an
+                                             ;; unproven store — record it;
+                                             ;; the evidence checker fails
+                                             ;; the run
+                                             {:outcome :remount-unproven
+                                              :error   (:error remount)
+                                              :fired   fired?}
+                                             (let [before (startup-lines!)]
+                                               (jdb/start! (:db t) t n)
+                                               (assoc (await-start-or-refusal! before)
+                                                      :fired fired?)))
+                                           forensics))))
                          (get target)
                          (assoc :victim target)))))))
 

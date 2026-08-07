@@ -814,7 +814,11 @@
   the lazyfs logs AND every recorded :torn-restart to have re-proven its
   remount (an outcome other than :remount-unproven; :started,
   :refused-start and :wedged are all legal recorded experiment results —
-  the run's other checkers grade their client-visible effects)."
+  the run's other checkers grade their client-visible effects). A
+  no-fire conviction quotes any :armed-path-stale? forensics the heal
+  recorded (armed segment vs the open segment at heal time): segments
+  roll on every restart, term change or 8 MB, so a roll landing between
+  arming and the tear self-identifies in the verdict."
   [unsync-required? torn-required? {:keys [counts] :as evidence} restarts]
   (let [total-of   (fn [k] (reduce + 0 (keep #(get % k) (vals counts))))
         drops      (total-of :clear-cache-ack)
@@ -835,11 +839,21 @@
                         "dropped anything and tested nothing"))
 
       (and torn-required? (zero? fires))
-      (assoc base :valid? false
-             :error :no-durability-fault-evidence
-             :note (str "torn-write nemesis ran but no lazyfs log shows "
-                        "a fired torn-op (persisted-part write) — the "
-                        "tear never landed and the run tested nothing"))
+      (let [stale (filterv :armed-path-stale? restarts)]
+        (assoc base :valid? false
+               :error :no-durability-fault-evidence
+               :note (str "torn-write nemesis ran but no lazyfs log shows "
+                          "a fired torn-op (persisted-part write) — the "
+                          "tear never landed and the run tested nothing"
+                          (when (seq stale)
+                            (str "; the heal's forensics show the armed path"
+                                 " went stale before any write — Ratis rolls"
+                                 " the open segment on every restart, term"
+                                 " change or 8 MB — "
+                                 (pr-str (mapv #(select-keys
+                                                  % [:armed-segment
+                                                     :open-segment-now])
+                                               stale)))))))
 
       (and torn-required? (seq unproven))
       (assoc base :valid? false

@@ -33,12 +33,12 @@ preserved).
 | `env/README.md` | lazyfs section (pin, accommodation, inertness, `/dev/fuse`) + arch-support note |
 | `harness/src/ratis_jepsen/env_contract.clj` | M4 additions: `lazyfs-bin`, `backing-dir`, `lazyfs-log-file` (shared by env and harness) |
 | `harness/src/ratis_jepsen/db.clj` | mount lifecycle: per-node toml (128 MiB cache, documented sizing), daemonized lazyfs outliving SUT restarts, **the evidence law** (`prove-mount!`: mount-table type + fault fifo + fsync'd canary in the backing dir; any shortfall throws the distinct `DURABILITY MOUNT UNPROVEN` error), teardown/wipe including the mount-aware membership `wipe-storage!`, fault surface (`clear-cache!`, `torn-write!` + pure `torn-write-command`, `current-open-segment!`, `remount-lazyfs!`), lazyfs log collected per node |
-| `harness/src/ratis_jepsen/nemesis.clj` | the three durability kinds + `durability-kinds`, fault→heal entries (liveness gating inherited), `durability-nemesis` (kill→drop ordering B; torn arm/fire/remount/restart with recorded `:started`/`:refused-start`/`:wedged`), pinned cycles with the knossos-budget rationale, membership `pool-return!` made mount-aware |
-| `harness/src/ratis_jepsen/checker.clj` | `durability-evidence` checker: clear-cache acks / fired tears counted from the snarfed lazyfs logs; dedicated runs failing with `:no-durability-fault-evidence` or `:torn-recovery-unproven` when the fault or its recovery half never really ran |
+| `harness/src/ratis_jepsen/nemesis.clj` | the three durability kinds + `durability-kinds`, fault→heal entries (liveness gating inherited), `durability-nemesis` (kill→drop ordering B; torn arm/fire/remount/restart with recorded `:started`/`:refused-start`/`:wedged`, plus armed-vs-now stale-path forensics on a never-fired tear), pinned cycles with the knossos-budget rationale, membership `pool-return!` made mount-aware |
+| `harness/src/ratis_jepsen/checker.clj` | `durability-evidence` checker: clear-cache acks / fired tears counted from the snarfed lazyfs logs; dedicated runs failing with `:no-durability-fault-evidence` or `:torn-recovery-unproven` when the fault or its recovery half never really ran (a no-fire red quotes any recorded stale-armed-path forensics) |
 | `harness/src/ratis_jepsen/core.clj` | `--durability` (forced on by durability kinds), `--torn-persist-part`, per-kind workload defaults for `unsync-drop-all` (rate 0.5, key-count 10), run-name suffix |
 | `harness/src/ratis_jepsen/workload/{register,counter}.clj` | `:durability-evidence` composed (required for the dedicated durability kinds only) |
 | `harness/scripts/metadata-probe.sh` | the bounded deliverable-4 probe (elections + mount-vs-backing sampling + drop/restart term check) |
-| `harness/test/…` | unit tests: contract pins, toml content, torn command grammar, segment/package shapes, mixed-all stays durability-free, evidence counting/verdicts (suite: 107 tests / 951 assertions) |
+| `harness/test/…` | unit tests: contract pins, toml content, torn command grammar, segment/package shapes, mixed-all stays durability-free, evidence counting/verdicts incl. the stale-armed-path forensics note (suite: 107 tests / 958 assertions) |
 | `.github/workflows/jepsen.yml` | scenarios input description only: durability tokens documented as dispatchable, kept out of the default sweep, runner cost stated (bare tokens already reach `--nemesis`; the harness forces the topology on) |
 | `docs/RUNS.md` | the M4 gate ledger (append) |
 
@@ -231,9 +231,10 @@ Apache-2.0 headers on all new files.
 3. **`mixed-all` does not draw durability faults.** "Composable into
    mixed-all only where sensible" — judged not sensible; reasons in the
    expectations table's out-of-scope note (opt-in storage topology; a
-   refused torn victim legally stays down; election-driven segment
-   rolls would stale the armed path). Unit-tested
-   (`mixed-all stays durability-free`).
+   refused torn victim legally stays down; restart- or election-driven
+   segment rolls would stale the armed path — every restart rolls the
+   open segment, not just term changes/8 MB, and mixed-all restarts
+   nodes constantly). Unit-tested (`mixed-all stays durability-free`).
 4. **Clean-recovery arm of torn-write not observed.** Both
    `persist-part` shapes bias toward refusal in practice: a mid-entry
    cut leaves a checksum-broken entry (observed), a hole leaves
@@ -264,12 +265,23 @@ Apache-2.0 headers on all new files.
 - **arm64 remains untested** for lazyfs (PLAN Q8 stance kept): the
   image builds without the binary there and durability runs fail
   loudly at mount proof; every other scenario is unaffected.
-- **The armed torn path can go stale if an election lands between
-  arming and fire** (segments roll on term change — 8 MB is
-  unreachable here). Impossible in the shipped one-shot schedule (no
-  other fault runs; sub-second window), and a miss is a loud
-  evidence-law red, never a silent green; relevant only if someone
-  composes durability kinds with election-causing faults later.
+- **The armed torn path goes stale if a segment roll lands between
+  arming and fire.** Rolls happen on term change, at 8 MB — and on
+  EVERY restart: reopening the log rolls the recovered in-progress
+  segment to a closed name (the Job 10 spike's own logs show
+  `log_inprogress_0` → `log_0-10` + `log_inprogress_11` across one
+  restart), and lazyfs keys torn faults on exact paths, so a path
+  captured before any of these events targets a file Ratis never
+  writes again. That is why the nemesis re-discovers the segment
+  inside every arm and never caches it. No roll trigger exists inside
+  the shipped one-shot schedule (no other fault runs; sub-second
+  window); a miss is a loud evidence-law red, never a silent green;
+  and a never-fired tear now records `:armed-segment` /
+  `:open-segment-now` / `:armed-path-stale?` in the heal op — quoted
+  by the red verdict — so a staled arm names itself. Relevant if
+  durability kinds are ever composed with restart- or
+  election-causing faults, which is nearly every other kind in this
+  harness.
 - **lazyfs remains a research prototype**: the pin is load-bearing
   (this job found two fifo-grammar bugs at it); re-verify behavior
   before any bump, and note the fifo write path blocks forever without
