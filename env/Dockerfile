@@ -84,6 +84,12 @@ ARG DEBIAN_FRONTEND=noninteractive
 # SIGSTOP/kill, ss). rsync/scp: artifact distribution. rlwrap: `clj` REPL.
 # libfuse3-3/fuse3: runtime for the lazyfs durability mounts (Job 11/M4) —
 # fusermount3 and the FUSE libs; inert unless a run passes --durability.
+# git: real git on control (Job 17) — jepsen shells it for provenance
+# logging and tools.gitlibs needs it should a git dep ever return; the
+# always-fails shim run.sh test used to install remains as a guarded
+# no-op fallback for images that predate this line.
+# gnuplot-nox: jepsen's post-run latency/rate plots (Job 17) — CI stores
+# previously carried none because the binary was missing.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       openjdk-21-jdk-headless \
       openssh-server \
@@ -96,6 +102,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       ca-certificates \
       rlwrap \
+      git \
+      gnuplot-nox \
       libfuse3-3 \
       fuse3 \
     && rm -rf /var/lib/apt/lists/*

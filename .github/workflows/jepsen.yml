@@ -315,3 +315,37 @@ jobs:
           path: store-red-gate.tar.gz
           if-no-files-found: warn
           retention-days: 7
+
+  # The harness's OWN unit + integration suite (Job 17; capstone §2.4):
+  # outcome.clj and checker.clj are the code that decides convictions,
+  # so every dispatch re-runs their tests — not opt-in, and a test
+  # failure fails the workflow. Runs natively on the runner: no Docker
+  # topology is needed (the integration test boots in-process ratis-kv
+  # servers on localhost), which keeps it cheap and parallel to the
+  # scenario jobs. The SUT jar is a :test-alias dependency; its own
+  # Maven suite already runs in build-sut's `package`, hence -DskipTests
+  # here. The Clojure CLI version matches the env image's pin.
+  harness-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: |
+            sut/ratis-kv/pom.xml
+            harness/deps.edn
+      - name: Install the Clojure CLI
+        run: |
+          curl -fsSL \
+            "https://download.clojure.org/install/linux-install-1.12.1.1550.sh" \
+            -o /tmp/clojure-install.sh
+          sudo bash /tmp/clojure-install.sh
+          clojure --version
+      - name: Install the SUT jar (harness test dependency)
+        run: sut/ratis-kv/mvnw -f sut/ratis-kv/pom.xml -q -DskipTests install
+      - name: Run the harness test suite
+        run: cd harness && clojure -M:test

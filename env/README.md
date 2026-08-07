@@ -19,6 +19,11 @@ env/run.sh test      # run the harness on control; args pass through
 env/run.sh probe     # the Job 12 in-JVM library probe (BACKLOG 7/8) on
                      # control; --ratis-version selects the Ratis jars.
                      # Touches no db node
+env/run.sh selftest  # the harness's OWN unit + integration suite
+                     # (clojure -M:test) inside control (Job 17):
+                     # installs the SUT jar into the maven-repo volume,
+                     # then runs the suite. Touches no db node; exit 0
+                     # = all green
 env/validate.sh      # end-to-end proof: SUT build on control, 5-node boot,
                      # exactly one *current* leader (last role transition
                      # per node), ports, clean SIGTERM stop

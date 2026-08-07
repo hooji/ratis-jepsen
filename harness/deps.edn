@@ -49,19 +49,27 @@
   {:jvm-opts ["-Xmx10g"]
    :main-opts ["-m" "ratis-jepsen.core"]}
 
-  ;; Unit + in-JVM integration tests: clojure -M:test.
-  ;; The SUT jar must be installed first:
+  ;; Unit + in-JVM integration tests: clojure -M:test (in the shipped
+  ;; environment: env/run.sh selftest, which installs the SUT jar and
+  ;; runs this alias inside control). The SUT jar must be installed
+  ;; first:
   ;;   sut/ratis-kv/mvnw -f sut/ratis-kv/pom.xml -q install
   ;; (test-only dep: the integration test boots 3 in-process ratis-kv
   ;; servers; the harness proper never depends on SUT internals.)
+  ;;
+  ;; The runner is our own ratis-jepsen.test-runner (test/, Job 17):
+  ;; cognitect test-runner is distributed as a GIT dependency only,
+  ;; and resolving it needs a working git at classpath-build time —
+  ;; which the control container did not have, so the documented
+  ;; command failed before loading a single test (capstone §2.4).
+  ;; Plain clojure.test + tools.namespace are ordinary Maven deps; the
+  ;; classpath now resolves from the Maven repo alone.
   :test
   {:extra-paths ["test"]
    :extra-deps
    {ratis-jepsen/ratis-kv {:mvn/version "0.1.0-SNAPSHOT"}
-    io.github.cognitect-labs/test-runner
-    {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
-   :main-opts ["-m" "cognitect.test-runner"]
-   :exec-fn cognitect.test-runner.api/test}
+    org.clojure/tools.namespace {:mvn/version "1.5.1"}}
+   :main-opts ["-m" "ratis-jepsen.test-runner"]}
 
   ;; The Job 12 library probe (BACKLOG 7/8 at an arbitrary version):
   ;; in-JVM RaftServers on a deliberately naive BaseStateMachine subclass

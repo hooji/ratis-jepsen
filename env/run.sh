@@ -20,6 +20,7 @@
 #   run.sh down   stop and remove containers, network and volumes; idempotent
 #   run.sh test   run the harness on control; args pass through (--nemesis, --time-limit, --seed-bug, --ratis-version, --mixed-version, ...) and the harness exit code is the verdict
 #   run.sh probe  run the Job 12 in-JVM library probe (BACKLOG 7/8) on control; --ratis-version selects the Ratis jars
+#   run.sh selftest  run the harness's own unit + integration suite (clojure -M:test) inside control; touches no db node
 #
 # Environment knobs:
 #   RJ_SSH_READY_TIMEOUT   seconds to wait for each node's sshd (default 120)
@@ -282,6 +283,20 @@ build_sdeps() {
   printf '%s' "${sdeps}"
 }
 
+# run.sh selftest: the harness's OWN test suite (unit + in-JVM
+# integration, clojure -M:test) inside control — the Job 17 fix for
+# capstone §2.4, which found the documented command unrunnable in the
+# shipped environment. Installs the SUT jar into the maven-repo volume
+# first (a :test-alias dependency; -DskipTests because the SUT's own
+# suite runs in `mvnw package` builds and CI's build-sut). Touches no
+# db node; exit code is the suite's (0 = all green).
+cmd_selftest() {
+  compose exec -T control /ratis-jepsen/sut/ratis-kv/mvnw \
+    -f /ratis-jepsen/sut/ratis-kv/pom.xml -q -DskipTests install
+  compose exec -T control bash -c \
+    'cd /ratis-jepsen/harness && exec clojure -M:test'
+}
+
 # run.sh probe [--ratis-version V]: the Job 12 in-JVM library probe
 # (BACKLOG 7/8) on control, against the requested version's Ratis jars.
 # No db nodes are touched; output is the probe's PROBE lines plus the
@@ -302,10 +317,11 @@ usage() {
 
 main() {
   case "${1:-}" in
-    up)    cmd_up ;;
-    down)  cmd_down ;;
-    test)  shift; cmd_test "$@" ;;
-    probe) shift; cmd_probe "$@" ;;
+    up)       cmd_up ;;
+    down)     cmd_down ;;
+    test)     shift; cmd_test "$@" ;;
+    probe)    shift; cmd_probe "$@" ;;
+    selftest) cmd_selftest ;;
     -h|--help|help|'') usage; [[ "${1:-}" ]] || exit 2 ;;
     *) echo "run.sh: unknown subcommand: $1" >&2; usage >&2; exit 2 ;;
   esac
