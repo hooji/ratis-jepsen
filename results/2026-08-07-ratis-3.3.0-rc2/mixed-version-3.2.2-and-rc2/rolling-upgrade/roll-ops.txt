@@ -1,0 +1,10 @@
+:nemesis	:info	:roll	nil
+:nemesis	:info	:roll	{:node "n1", :from "3.2.2", :to "3.3.0", :await :started, :active "3.3.0", :versions-now {"n1" "3.3.0", "n2" "3.2.2", "n3" "3.2.2", "n4" "3.2.2", "n5" "3.2.2"}}
+:nemesis	:info	:roll	nil
+:nemesis	:info	:roll	{:node "n2", :from "3.2.2", :to "3.3.0", :await :started, :active "3.3.0", :versions-now {"n1" "3.3.0", "n2" "3.3.0", "n3" "3.2.2", "n4" "3.2.2", "n5" "3.2.2"}}
+:nemesis	:info	:roll	nil
+:nemesis	:info	:roll	{:node "n3", :from "3.2.2", :to "3.3.0", :await :started, :active "3.3.0", :versions-now {"n1" "3.3.0", "n2" "3.3.0", "n3" "3.3.0", "n4" "3.2.2", "n5" "3.2.2"}}
+:nemesis	:info	:roll	nil
+:nemesis	:info	:roll	{:node "n4", :from "3.2.2", :to "3.3.0", :await :started, :active "3.3.0", :versions-now {"n1" "3.3.0", "n2" "3.3.0", "n3" "3.3.0", "n4" "3.3.0", "n5" "3.2.2"}}
+:nemesis	:info	:roll	nil
+:nemesis	:info	:roll	{:node "n5", :from "3.2.2", :to "3.3.0", :await :started, :active "3.3.0", :versions-now {"n1" "3.3.0", "n2" "3.3.0", "n3" "3.3.0", "n4" "3.3.0", "n5" "3.3.0"}}

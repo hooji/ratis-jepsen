@@ -1,0 +1,34 @@
+# Evidence excerpts grep'd from this run's per-node logs
+# (<store>/<node>/ratis-kv.log and, on durability runs, lazyfs.log).
+# grep -E pattern: received 'lazyfs::clear-cache'|cache is cleared|torn-op|will persist [0-9]+ bytes|Killing LazyFS
+
+n1/lazyfs.log:19:[2026-08-07 18:13:26.496] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n1/lazyfs.log:21:[2026-08-07 18:13:26.498] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n1/lazyfs.log:24:[2026-08-07 18:14:57.426] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n1/lazyfs.log:26:[2026-08-07 18:14:57.428] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n1/lazyfs.log:30:[2026-08-07 18:15:58.032] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n1/lazyfs.log:32:[2026-08-07 18:15:58.033] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n1/lazyfs.log:37:[2026-08-07 18:16:28.321] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n1/lazyfs.log:39:[2026-08-07 18:16:28.321] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n1/lazyfs.log:44:[2026-08-07 18:17:28.907] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n1/lazyfs.log:46:[2026-08-07 18:17:28.908] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n1/lazyfs.log:52:[2026-08-07 18:17:59.199] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n1/lazyfs.log:54:[2026-08-07 18:17:59.199] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n2/lazyfs.log:19:[2026-08-07 18:13:56.828] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n2/lazyfs.log:21:[2026-08-07 18:13:56.829] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n3/lazyfs.log:20:[2026-08-07 18:14:27.123] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n3/lazyfs.log:22:[2026-08-07 18:14:27.125] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n3/lazyfs.log:25:[2026-08-07 18:15:27.737] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n3/lazyfs.log:27:[2026-08-07 18:15:27.738] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n4/lazyfs.log:19:[2026-08-07 18:13:56.828] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n4/lazyfs.log:21:[2026-08-07 18:13:56.829] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n4/lazyfs.log:24:[2026-08-07 18:15:27.736] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n4/lazyfs.log:26:[2026-08-07 18:15:27.742] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n4/lazyfs.log:31:[2026-08-07 18:17:28.909] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n4/lazyfs.log:33:[2026-08-07 18:17:28.910] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n5/lazyfs.log:20:[2026-08-07 18:14:57.433] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n5/lazyfs.log:22:[2026-08-07 18:14:57.438] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n5/lazyfs.log:26:[2026-08-07 18:16:58.615] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n5/lazyfs.log:28:[2026-08-07 18:16:58.618] [console] [warning] [lazyfs.cmds]: cache is cleared.
+n5/lazyfs.log:33:[2026-08-07 18:17:59.201] [console] [info] [lazyfs.faults.worker]: received 'lazyfs::clear-cache'
+n5/lazyfs.log:35:[2026-08-07 18:17:59.202] [console] [warning] [lazyfs.cmds]: cache is cleared.

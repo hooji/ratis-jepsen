@@ -1,0 +1,190 @@
+{:valid? true,
+ :independent {:valid? true,
+               :results {0 {:linearizable {:valid? true,
+                                           :configs ({:model #knossos.model.CASRegister{:value 4},
+                                                      :last-op {:process 0,
+                                                                :type :ok,
+                                                                :f :read,
+                                                                :value 4,
+                                                                :index 2957,
+                                                                :time 31964544741},
+                                                      :pending []}),
+                                           :analyzer :linear,
+                                           :final-paths ()},
+                            :timeline {:valid? true},
+                            :valid? true},
+                         1 {:linearizable {:valid? true,
+                                           :configs ({:model #knossos.model.CASRegister{:value 2},
+                                                      :last-op {:process 2,
+                                                                :type :ok,
+                                                                :f :read,
+                                                                :value 2,
+                                                                :index 2885,
+                                                                :time 30992215943},
+                                                      :pending []}),
+                                           :analyzer :linear,
+                                           :final-paths ()},
+                            :timeline {:valid? true},
+                            :valid? true},
+                         2 {:linearizable {:valid? true,
+                                           :configs ({:model #knossos.model.CASRegister{:value 1},
+                                                      :last-op {:process 5,
+                                                                :type :ok,
+                                                                :f :read,
+                                                                :value 1,
+                                                                :index 2975,
+                                                                :time 32597569120},
+                                                      :pending []}),
+                                           :analyzer :linear,
+                                           :final-paths ()},
+                            :timeline {:valid? true},
+                            :valid? true},
+                         3 {:linearizable {:valid? true,
+                                           :configs ({:model #knossos.model.CASRegister{:value 0},
+                                                      :last-op {:process 6,
+                                                                :type :ok,
+                                                                :f :write,
+                                                                :value 0,
+                                                                :index 2893,
+                                                                :time 31080733498},
+                                                      :pending []}),
+                                           :analyzer :linear,
+                                           :final-paths ()},
+                            :timeline {:valid? true},
+                            :valid? true},
+                         4 {:linearizable {:valid? true,
+                                           :configs ({:model #knossos.model.CASRegister{:value 2},
+                                                      :last-op {:process 8,
+                                                                :type :ok,
+                                                                :f :write,
+                                                                :value 2,
+                                                                :index 2997,
+                                                                :time 33463020931},
+                                                      :pending []}),
+                                           :analyzer :linear,
+                                           :final-paths ()},
+                            :timeline {:valid? true},
+                            :valid? true}},
+               :failures []},
+ :joiner-install-evidence {:valid? true,
+                           :note "joiner-install evidence not required for this run",
+                           :joined ["n3"
+                                    "n6"
+                                    "n4"
+                                    "n2"
+                                    "n7"
+                                    "n1"
+                                    "n5"],
+                           :joined-with-installs []},
+ :durability-evidence {:clear-cache-acks 0,
+                       :torn-fired 0,
+                       :torn-armed 0,
+                       :lazyfs-selfkills 0,
+                       :torn-restarts [],
+                       :counts {"n1" {:clear-cache-ack 0,
+                                      :torn-armed 0,
+                                      :torn-fired 0,
+                                      :lazyfs-selfkill 0},
+                                "n2" {:clear-cache-ack 0,
+                                      :torn-armed 0,
+                                      :torn-fired 0,
+                                      :lazyfs-selfkill 0},
+                                "n3" {:clear-cache-ack 0,
+                                      :torn-armed 0,
+                                      :torn-fired 0,
+                                      :lazyfs-selfkill 0},
+                                "n4" {:clear-cache-ack 0,
+                                      :torn-armed 0,
+                                      :torn-fired 0,
+                                      :lazyfs-selfkill 0},
+                                "n5" {:clear-cache-ack 0,
+                                      :torn-armed 0,
+                                      :torn-fired 0,
+                                      :lazyfs-selfkill 0},
+                                "n6" {:clear-cache-ack 0,
+                                      :torn-armed 0,
+                                      :torn-fired 0,
+                                      :lazyfs-selfkill 0},
+                                "n7" {:clear-cache-ack 0,
+                                      :torn-armed 0,
+                                      :torn-fired 0,
+                                      :lazyfs-selfkill 0}},
+                       :valid? true,
+                       :note "durability evidence not required for this run"},
+ :liveness {:valid? true,
+            :window-s 60,
+            :grace-s 15,
+            :max-attempt-gap-s 10,
+            :calm-regions-s [[0.164 30.675]
+                             [54.935 85.991]
+                             [111.091 126.855]
+                             [151.1 213.418]
+                             [237.614 252.989]
+                             [277.419 293.887]],
+            :violations []},
+ :install-snapshot-evidence {:valid? true,
+                             :note "no snapshot-churn ops in history — evidence not required",
+                             :total 0,
+                             :counts {"n1" {:send 0, :receive 0},
+                                      "n2" {:send 0, :receive 0},
+                                      "n3" {:send 0, :receive 0},
+                                      "n4" {:send 0, :receive 0},
+                                      "n5" {:send 0, :receive 0},
+                                      "n6" {:send 0, :receive 0},
+                                      "n7" {:send 0, :receive 0}}},
+ :membership-evidence {:valid? true,
+                       :transitions 21,
+                       :indexes [838
+                                 1894
+                                 1978
+                                 1982
+                                 1986
+                                 1994
+                                 1998
+                                 2002
+                                 2006
+                                 2010
+                                 2014
+                                 2018
+                                 2022
+                                 2026
+                                 2030
+                                 2034
+                                 2038
+                                 2044
+                                 2048
+                                 2052
+                                 2056]},
+ :exceptions {:valid? true},
+ :stats {:valid? true,
+         :count 1500,
+         :ok-count 1078,
+         :fail-count 422,
+         :info-count 0,
+         :by-f {:cas {:valid? true,
+                      :count 510,
+                      :ok-count 88,
+                      :fail-count 422,
+                      :info-count 0},
+                :read {:valid? true,
+                       :count 503,
+                       :ok-count 503,
+                       :fail-count 0,
+                       :info-count 0},
+                :write {:valid? true,
+                        :count 487,
+                        :ok-count 487,
+                        :fail-count 0,
+                        :info-count 0}}},
+ :rolling-upgrade-evidence {:rolls-applied [],
+                            :rolls-failed [],
+                            :roll-skips 0,
+                            :nodes-missing ["n1"
+                                            "n2"
+                                            "n3"
+                                            "n4"
+                                            "n5"
+                                            "n6"
+                                            "n7"],
+                            :valid? true,
+                            :note "rolling evidence not required for this run"}}

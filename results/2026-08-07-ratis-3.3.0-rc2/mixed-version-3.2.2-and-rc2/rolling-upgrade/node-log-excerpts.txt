@@ -1,0 +1,14 @@
+# Evidence excerpts grep'd from this run's per-node logs
+# (<store>/<node>/ratis-kv.log and, on durability runs, lazyfs.log).
+# grep -E pattern: Started RaftServer|server started
+
+n1/ratis-kv.log:95:2026-08-07 18:22:02.372 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n1 address=n1:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
+n1/ratis-kv.log:262:2026-08-07 18:22:34.906 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n1 address=n1:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
+n2/ratis-kv.log:95:2026-08-07 18:22:02.363 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n2 address=n2:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
+n2/ratis-kv.log:249:2026-08-07 18:23:01.510 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n2 address=n2:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
+n3/ratis-kv.log:96:2026-08-07 18:22:02.465 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n3 address=n3:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
+n3/ratis-kv.log:231:2026-08-07 18:23:28.072 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n3 address=n3:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
+n4/ratis-kv.log:96:2026-08-07 18:22:02.237 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n4 address=n4:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
+n4/ratis-kv.log:236:2026-08-07 18:23:54.606 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n4 address=n4:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
+n5/ratis-kv.log:95:2026-08-07 18:22:02.048 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n5 address=n5:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
+n5/ratis-kv.log:517:2026-08-07 18:24:21.072 [main] INFO ratis.jepsen.kv.Main - ratis-kv server started: id=n5 address=n5:6000 storage=/var/lib/ratis-kv group=group-ABBC16E54704 peers={n1=n1:6000, n2=n2:6000, n3=n3:6000, n4=n4:6000, n5=n5:6000}
