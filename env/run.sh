@@ -18,7 +18,8 @@
 #
 #   run.sh up     build image if needed, start compose, wait for ssh on all nodes
 #   run.sh down   stop and remove containers, network and volumes; idempotent
-#   run.sh test   run the harness on control; args pass through (--nemesis, --time-limit, --seed-bug, ...) and the harness exit code is the verdict
+#   run.sh test   run the harness on control; args pass through (--nemesis, --time-limit, --seed-bug, --ratis-version, --mixed-version, ...) and the harness exit code is the verdict
+#   run.sh probe  run the Job 12 in-JVM library probe (BACKLOG 7/8) on control; --ratis-version selects the Ratis jars
 #
 # Environment knobs:
 #   RJ_SSH_READY_TIMEOUT   seconds to wait for each node's sshd (default 120)
@@ -250,6 +251,21 @@ SHIM
   # core.clj re-checks the real classpath and refuses on skew. With
   # RJ_RATIS_REPO_URL set, the same -Sdeps adds the extra repository so
   # staged (RC) artifacts resolve inside control.
+  local sdeps
+  sdeps=$(build_sdeps)
+  compose exec -T control bash -c \
+    'cd /ratis-jepsen/harness && exec clojure -Sdeps "$1" -M:run:sut-ratis test \
+       --store-dir /ratis-jepsen/store \
+       --nodes n1,n2,n3,n4,n5 \
+       --ssh-private-key /root/.ssh/id_ed25519 \
+       "${@:2}"' harness-test "${sdeps}" "$@"
+  # END Job-04 test body
+}
+
+# The -Sdeps override string for CLIENT_VERSION (+ optional extra repo):
+# the three harness client deps, plus ratis-server — inert for `test`
+# (the harness never depends on it) and load-bearing for `probe`.
+build_sdeps() {
   local sdeps="{"
   if [[ -n "${RJ_RATIS_REPO_URL:-}" ]]; then
     if [[ ! "${RJ_RATIS_REPO_URL}" =~ ^https?://[^[:space:]\"\{\}]+$ ]]; then
@@ -261,14 +277,23 @@ SHIM
   sdeps+=":aliases {:sut-ratis {:override-deps {"
   sdeps+="org.apache.ratis/ratis-client {:mvn/version \"${CLIENT_VERSION}\"} "
   sdeps+="org.apache.ratis/ratis-grpc {:mvn/version \"${CLIENT_VERSION}\"} "
-  sdeps+="org.apache.ratis/ratis-metrics-default {:mvn/version \"${CLIENT_VERSION}\"}}}}}"
+  sdeps+="org.apache.ratis/ratis-metrics-default {:mvn/version \"${CLIENT_VERSION}\"} "
+  sdeps+="org.apache.ratis/ratis-server {:mvn/version \"${CLIENT_VERSION}\"}}}}}"
+  printf '%s' "${sdeps}"
+}
+
+# run.sh probe [--ratis-version V]: the Job 12 in-JVM library probe
+# (BACKLOG 7/8) on control, against the requested version's Ratis jars.
+# No db nodes are touched; output is the probe's PROBE lines plus the
+# servers' ordinary logs (the wrapper's caller counts appender lines
+# from them). Exit code is the probe's.
+cmd_probe() {
+  parse_test_versions "$@"
+  local sdeps
+  sdeps=$(build_sdeps)
   compose exec -T control bash -c \
-    'cd /ratis-jepsen/harness && exec clojure -Sdeps "$1" -M:run:sut-ratis test \
-       --store-dir /ratis-jepsen/store \
-       --nodes n1,n2,n3,n4,n5 \
-       --ssh-private-key /root/.ssh/id_ed25519 \
-       "${@:2}"' harness-test "${sdeps}" "$@"
-  # END Job-04 test body
+    'cd /ratis-jepsen/harness && exec clojure -Sdeps "$1" -M:probe:sut-ratis' \
+    harness-probe "${sdeps}"
 }
 
 usage() {
@@ -277,9 +302,10 @@ usage() {
 
 main() {
   case "${1:-}" in
-    up)   cmd_up ;;
-    down) cmd_down ;;
-    test) shift; cmd_test "$@" ;;
+    up)    cmd_up ;;
+    down)  cmd_down ;;
+    test)  shift; cmd_test "$@" ;;
+    probe) shift; cmd_probe "$@" ;;
     -h|--help|help|'') usage; [[ "${1:-}" ]] || exit 2 ;;
     *) echo "run.sh: unknown subcommand: $1" >&2; usage >&2; exit 2 ;;
   esac

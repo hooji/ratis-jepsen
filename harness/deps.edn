@@ -61,4 +61,14 @@
     io.github.cognitect-labs/test-runner
     {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
    :main-opts ["-m" "cognitect.test-runner"]
-   :exec-fn cognitect.test-runner.api/test}}}
+   :exec-fn cognitect.test-runner.api/test}
+
+  ;; The Job 12 library probe (BACKLOG 7/8 at an arbitrary version):
+  ;; in-JVM RaftServers on a deliberately naive BaseStateMachine subclass
+  ;; — needs ratis-server, which the harness proper never depends on.
+  ;; The version comes from the same -Sdeps :override-deps injection as
+  ;; everything else (env/run.sh probe); the pin below is the default.
+  :probe
+  {:extra-paths ["probe"]
+   :extra-deps {org.apache.ratis/ratis-server {:mvn/version "3.2.2"}}
+   :main-opts ["-m" "ratis-jepsen.probe.lifecycle"]}}}
