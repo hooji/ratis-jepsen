@@ -16,6 +16,64 @@
 # construction: ubuntu:24.04 is a multi-arch manifest, all packages come from
 # apt (which resolves per-architecture), and the Clojure CLI is pure-JVM
 # installed by the official arch-neutral installer — no arch-pinned URLs.
+# The one arch-bound piece, lazyfs, is built in a throwaway stage on amd64
+# only (PLAN Q8: lazyfs is x86-CI-only) — other arches get an image without
+# the binary, and a --durability run fails loudly at mount proof.
+
+# --- lazyfs build stage (Job 11 / M4) --------------------------------------
+# Builds lazyfs at the Job 10 spike's pinned commit (the project calls its
+# main branch "probably unstable"; the pin is load-bearing). spdlog is
+# pre-cloned and fed to libpcache's CMake FetchContent instead of letting it
+# fetch a GitHub archive tarball — the spike's dependency accommodation:
+# TLS-inspecting proxies commonly 403 archive tarballs while plain git
+# clone works, and the pre-fetch behaves identically on open networks.
+# lazyfs's own CMakeLists hardcodes libpcache's _deps path for spdlog
+# headers, hence the symlink. Everything here is discarded except /out.
+FROM ubuntu:24.04 AS lazyfs-build
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG LAZYFS_COMMIT=045a0b3a1126725e693934e29d3ba15e08cc39ec
+ARG SPDLOG_TAG=v1.10.0
+
+# Same optional proxy-CA knob as the main stage (git clone over https needs
+# it behind TLS-inspecting proxies); no JVM here, so a single multi-cert
+# file into the system store suffices.
+ARG EXTRA_CA_B64=
+RUN if [ -n "$EXTRA_CA_B64" ]; then \
+      mkdir -p /usr/local/share/ca-certificates \
+      && echo "$EXTRA_CA_B64" | base64 -d \
+           > /usr/local/share/ca-certificates/ratis-jepsen-build-ca.crt; \
+    fi
+
+ARG TARGETARCH
+RUN set -eu; \
+    arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
+    if [ "$arch" = "amd64" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        g++ cmake make git ca-certificates pkg-config libfuse3-dev fuse3 \
+      && rm -rf /var/lib/apt/lists/* \
+      && update-ca-certificates \
+      && git clone --depth 1 --branch "${SPDLOG_TAG}" \
+           https://github.com/gabime/spdlog.git /opt/spdlog-src \
+      && git clone https://github.com/dsrhaslab/lazyfs.git /opt/lazyfs-src \
+      && git -C /opt/lazyfs-src checkout "${LAZYFS_COMMIT}" \
+      && mkdir -p /opt/lazyfs-src/libs/libpcache/build \
+      && cd /opt/lazyfs-src/libs/libpcache/build \
+      && cmake -DFETCHCONTENT_SOURCE_DIR_SPDLOG=/opt/spdlog-src .. \
+      && cmake --build . -j"$(nproc)" \
+      && ln -sfn /opt/spdlog-src \
+           /opt/lazyfs-src/libs/libpcache/build/_deps/spdlog-src \
+      && cd /opt/lazyfs-src/lazyfs && ./build.sh \
+      && mkdir -p /out \
+      && cp /opt/lazyfs-src/lazyfs/build/lazyfs /out/lazyfs \
+      && cp -a /opt/lazyfs-src/libs/libpcache/build/libpcache.so* /out/ \
+      && echo "${LAZYFS_COMMIT}" > /out/COMMIT; \
+    else \
+      echo "lazyfs: skipping build on ${arch} (x86-CI-only, PLAN Q8)"; \
+      mkdir -p /out; \
+    fi
+
+# --- the one runtime image -------------------------------------------------
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -24,6 +82,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 # openssh: control SSHes to nodes as root (Jepsen convention).
 # iproute2/iptables/psmisc/procps: fault injection + inspection (partitions,
 # SIGSTOP/kill, ss). rsync/scp: artifact distribution. rlwrap: `clj` REPL.
+# libfuse3-3/fuse3: runtime for the lazyfs durability mounts (Job 11/M4) —
+# fusermount3 and the FUSE libs; inert unless a run passes --durability.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       openjdk-21-jdk-headless \
       openssh-server \
@@ -36,7 +96,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       ca-certificates \
       rlwrap \
+      libfuse3-3 \
+      fuse3 \
     && rm -rf /var/lib/apt/lists/*
+
+# lazyfs (Job 11/M4): the binary and its libpcache shared lib from the
+# build stage (spdlog links statically; libpcache does not), plus the FUSE
+# allow_other permission its mounts use. /opt/lazyfs is empty on non-amd64
+# (PLAN Q8) — the harness proves the mount per node and fails a durability
+# run loudly when the binary is missing. Inert for every non-durability run.
+COPY --from=lazyfs-build /out/ /opt/lazyfs/
+RUN echo /opt/lazyfs > /etc/ld.so.conf.d/lazyfs.conf \
+    && ldconfig \
+    && echo user_allow_other >> /etc/fuse.conf
 
 # Optional extra CA certificate(s) (base64-encoded PEM bundle), for hosts
 # that sit behind a TLS-inspecting proxy: trusted system-wide, including the
