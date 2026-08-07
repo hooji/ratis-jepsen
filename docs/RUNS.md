@@ -636,3 +636,82 @@ this ledger's earlier gates + today's baseline; every cell a real run):
 | rolling upgrade 3.2.2→3.3.0 | — | — | GREEN, 5/5 rolled |
 | Library probe: base pause()/install (BACKLOG 7) | division dies; no-backoff hammering | **division dies; no-backoff hammering** (persists) | — |
 | Library probe: GroupInfoReply conf (BACKLOG 8) | dropped (empty) | **populated (fixed)** | — |
+
+## 2026-08-07 — Job 14: the published reference-run set (results committed under `results/`)
+
+*This entry is a summary; the full account of every run below —
+selected artifacts, per-run tables, evidence excerpts, and the
+expected-red labelling — is **committed to the repository** under
+[`results/`](../results/README.md), the one standing exception to the
+no-artifacts rule (PROCESS, owner decision 2026-08-06). Details that
+earlier ledger entries carry inline live there this time.*
+
+- **Commands**: two CI dispatches of the `jepsen` workflow at commit
+  `4126b48` (the workflow translates tokens to `env/run.sh test`
+  invocations; every store uploaded as a 7-day artifact), plus four
+  local runs for flags CI does not expose. CI sweep A (ratis 3.2.2):
+  [run 31205755119](https://github.com/hooji/ratis-jepsen/actions/runs/31205755119),
+  scenarios `none,partition,crash,pause,mixed,snapshot-churn,transfer,
+  membership,membership-snapshot-churn,mixed-all,counter-crash,
+  listener-probe,unsync-drop,unsync-drop-all,torn-write,
+  counter-unsync-drop` + the always-on red-gate. CI sweep B (ratis
+  3.3.0 RC2 via `RJ_RATIS_REPO_URL`= staging `orgapacheratis-1182`,
+  `--mixed-version 3.2.2,3.3.0`):
+  [run 31205774470](https://github.com/hooji/ratis-jepsen/actions/runs/31205774470),
+  same sixteen + `mv-partition,mv-crash,rolling-upgrade` + red-gate.
+  Local: `partition --reads mixed` at both versions; the Q14
+  expected-red (`counter --nemesis quorum-pause
+  --retry-cache-expiry-ms 500 --retry-delay-ms 5000 --rate 3
+  --ops-per-key 1200`); and its new control run — identical shape with
+  the retry cache left at the default 60 s.
+- **Versions**: ratis 3.2.2 (Central) and 3.3.0 RC2 (staging 1182;
+  same provenance verification as the M5 entry), jepsen 0.3.13, SUT
+  `ratis-kv 0.1.0-SNAPSHOT` (unchanged), JDK 21, lazyfs `045a0b3a`.
+- **Outcome, in one line each**:
+  - **All 33 expected-green CI runs green on first attempt** at both
+    versions — verdicts, liveness, and every evidence assertion
+    counted real events (installs 2+2, conf transitions 21+21 and 8+8
+    on the combined kind, all post-snapshot joiners installing to
+    join, lazyfs acks 15/20/14 and 16/20/16, torn-write fired and
+    **refused loudly** on both versions, counter retries 217/141 and
+    243/155 with exactly-once held, rolling upgrade 5/5 rolls).
+  - **Both CI red-gates convicted** the seeded stale-reads SUT on all
+    five keys (exit 1) — the sweep-level proof the harness still
+    catches bugs at both versions.
+  - **Q14 expected-red reproduced locally at 3.2.2**: `:double-count`
+    on all five keys with **zero `:info` ops** (1906/1906 acked, 305
+    retries) — every excess unit a proven double-apply; and the new
+    **default-window control run was green** (1893/1893, 308 retries,
+    all deduplicated, zero violations) — same fault, same retry
+    overshoot, only the 500 ms expiry flag differs. The Q14 boundary
+    is now bracketed inside one published run set.
+  - **Follower-read runs green at both versions** (`--reads mixed`
+    under partition): 3.2.2 — 1021/479/0, 156 of 414 `:ok` reads
+    follower-served (`n4:61 n3:55 n2:21 n1:19`), store
+    `…partition-ratis-3.2.2/20260807T181820.280Z`; 3.3.0 RC2 —
+    1055/445/0, 183 of 426 follower-served
+    (`n5:77 n4:50 n3:29 n1:27`), store
+    `…partition-ratis-3.3.0/20260807T184835.705Z` (the clean run after
+    the collision below).
+  - **Listener-probe at both versions re-showed the BACKLOG 9 wedge**
+    (conf mechanics commit; targeted reads refused in STARTING) — 
+    recorded, classification unchanged.
+- **Anomalies**: none in any CI verdict, nothing repeated there. One
+  local incident: the RC2 follower-reads scenario was accidentally
+  launched **twice concurrently** (a wrapper the worker wrongly
+  believed dead fired its queued copy) — two harnesses shared the
+  cluster for ~3.5 min, so **both runs were voided on the collision
+  facts** (A exit 0, B exit 2 `:unknown` — neither interpretable),
+  both published under
+  `results/2026-08-07-ratis-3.3.0-rc2/VOIDED-collided-runs/` with the
+  timeline, and the scenario re-run once alone (the reference row).
+  Also: local stores carry latency/rate PNGs (gnuplot installed into
+  the local control container for publication); CI stores do not (the
+  env image ships no gnuplot) — an environment difference only, noted
+  as a future env suggestion in the Job 14 report.
+- **Stores**: CI stores are in the runs' artifacts (7-day retention);
+  the durable, selected copies — including full `results.edn`,
+  compressed logs/histories, node-log evidence excerpts, conviction
+  SVGs and charts — are committed under
+  `results/2026-08-07-ratis-3.2.2/` and
+  `results/2026-08-07-ratis-3.3.0-rc2/`.

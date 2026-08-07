@@ -16,6 +16,15 @@ nodes over SSH (Jepsen convention). The system under test is
 the shipped client path (retry cache, `NotLeaderException` failover,
 sliding window) is under test too.
 
+**👉 The evidence is committed: [`results/`](results/README.md)** — 41
+reference runs from 2026-08-07 against
+[Ratis 3.2.2](results/2026-08-07-ratis-3.2.2/README.md) and the
+[3.3.0 RC2 candidate](results/2026-08-07-ratis-3.3.0-rc2/README.md)
+(checker verdicts, histories, evidence excerpts, most runs on public
+CI with the job linked per row). Runs whose directories and table rows
+say **`EXPECTED-RED`** fail *by design* — they are the proof the
+harness convicts a lying system, not harness failures.
+
 ## Status
 
 **M0–M5 complete** (jobs 01–12, each merged through an independent
