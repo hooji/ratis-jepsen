@@ -319,10 +319,20 @@
   (str lazyfs-backing-dir "/" env/group-uuid "/current/log_inprogress_0"))
 
 (def torn-write-occurrence
-  "Which write to that file gets torn. Not the first — the fault should
-  land on a log that already holds committed entries, so the restart
-  exercises recovery over real data rather than an empty segment."
-  60)
+  "Which write to the target file gets torn, counted from when the
+  injection is registered. ONE: the very next write after the mount is
+  armed.
+
+  This is deliberately the first write, and the arming point is what
+  makes the fault land on real data: the injection is NOT armed at
+  setup (the node's first cycle runs clean and accumulates committed
+  entries) but on every REMOUNT, so from the second cycle on, the first
+  write after each restart tears a log segment that already holds
+  committed entries. A larger occurrence was tried first and never
+  fired — the SUT does not issue that many writes to one segment inside
+  a cycle — and the evidence law caught it (:no-durability-fault-evidence,
+  preserved run in the ledger), which is exactly what the law is for."
+  1)
 
 (defn torn-write-injection
   "A lazyfs `torn-op` block: split the `occurrence`-th write to `file`
@@ -593,7 +603,10 @@
     ;; already lands on lazyfs; a failed mount throws here and fails the
     ;; run before a single op is issued.
     (when durability
-      (mount-lazyfs! node (:injection durability)))
+      ;; torn-write arms on remount only, so the first cycle runs clean
+      ;; and its tear later lands on a log with committed entries.
+      (mount-lazyfs! node (when-not (:arm-on-remount-only? durability)
+                            (:injection durability))))
     (jdb/start! this test node)
     (await-startup! node))
 

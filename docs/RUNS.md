@@ -416,3 +416,63 @@ all preserved:**
    own right: **the documented expiry hazard is timeout-shaped, not
    crash-shaped** — process death at LAN latencies cannot reach it,
    sustained ambiguity (quorum loss, freezes, slow disks) can.
+
+## 2026-08-07 — M4 gates: durability faults via lazyfs (Job 11)
+
+- **Commands**: `env/run.sh test --nemesis <kind> --time-limit 300`
+  (durability kinds mount lazyfs on every node automatically — no extra
+  flags; `unsync-drop-all` carries `ops-per-key 150`, see below)
+- **Versions**: ratis 3.2.2, jepsen 0.3.13, SUT `ratis-kv
+  0.1.0-SNAPSHOT`, JDK 21, lazyfs `045a0b3a1126725e693934e29d3ba15e08cc39ec`
+  baked into the env image
+- **Startup cost**: five lazyfs mounts add **~1.5 s** to a run
+  (setup→first op 8.6 s without, 10.1 s with; per-node cache
+  pre-allocation 386–1053 ms at 64 MB under concurrent load, vs ~8 s
+  each at lazyfs's 1 GiB default — the spike's warning, mitigated)
+
+| Run | Exit | Wall | Analysis | ok / fail / info | Mount + fault evidence | Store (`20260807T…`) |
+|---|---|---|---|---|---|---|
+| crash (durability OFF — regression) | 0 | 313 s | 1.3 s | 1093 / 407 / 0 | all 5 unmounted, `:valid? true` "not required" | `…register-crash/080322.033Z` |
+| unsync-drop | 0 | 312 s | 2.0 s | 1126 / 374 / 0 | 5/5 mounted, 15 drops | `…register-unsync-drop/084359.816Z` |
+| unsync-drop-all | 0 | 312 s | 2.2 s | 555 / 195 / 0 | 5/5 mounted, **282 drops** | `…register-unsync-drop-all/083254.588Z` |
+| counter + unsync-drop | 0 | 311 s | 2.0 s | 2033 / 2 / 48 | 5/5 mounted, 187 drops; 295 retries | `…counter-unsync-drop/082639.027Z` |
+
+**Safety held on every scenario.** Each register run's five independent
+keys were linearizable; the counter run's five keys satisfied
+exactly-once (no double-count, no lost update) *while* the same nodes
+were losing un-synced pages — durability × exactly-once in one run.
+`unsync-drop-all` is the milestone's headline: **the whole cluster
+discarded its un-synced page cache and was killed, nine times over,
+and not one acknowledged write was lost, nor one stale read served.**
+That is the outcome the expectations table predicted (Ratis syncs each
+append before acking — source-proven in Job 10's review), now
+demonstrated rather than assumed. Liveness stayed `:valid? true`
+throughout, including `unsync-drop-all`'s cluster-wide outage windows,
+which the fault/heal gating covers by construction.
+
+**The regression arm** matters as much: with durability off the
+mount-evidence checker reports every node *unmounted* and still passes
+(`"mount evidence not required for this run"`), and the run's shape is
+indistinguishable from the M1 crash reference — lazyfs in the image is
+inert until a durability scenario asks for it.
+
+**Preserved artifacts (the evidence law doing its job):**
+
+1. `…register-unsync-drop-all/081400.260Z` — exit **2**,
+   `:valid? :unknown`, `:cause :out-of-memory`: cluster-wide outages
+   produced 122 `:info` ops and knossos hit its documented memory
+   cliff (DESIGN §6; Job 07 hit the same wall at 147). **Not a safety
+   result** — the checker died, it did not convict. DESIGN §2.5's
+   sanctioned lever (shrink the per-key history and say so) gives this
+   kind `ops-per-key 150`; the re-run above is green with the fault
+   and its evidence unchanged.
+2. `…register-torn-write/083840.255Z` — exit **1**,
+   `:error :no-durability-fault-evidence`, `:tears 0` on every node.
+   Linearizability was fine; the run failed *because the fault never
+   fired*. The first torn-write design armed the tear at
+   `occurrence=60`, and the SUT never issues that many writes to one
+   log segment inside a cycle. A torn-write run that tore nothing
+   tested nothing — exactly what the law exists to catch, and it
+   caught it before the result could be reported as a pass.
+
+TBD-TORN-RESULT

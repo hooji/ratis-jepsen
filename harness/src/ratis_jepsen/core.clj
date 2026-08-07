@@ -266,8 +266,13 @@
         ;; a non-durability run never touches lazyfs at all.
         durability  (when (contains? nemesis/durability-kinds (:nemesis opts))
                       (cond-> {}
+                        ;; Armed on REMOUNT only (see
+                        ;; db/torn-write-occurrence): the first cycle
+                        ;; runs clean so the tear lands on a log that
+                        ;; already holds committed entries.
                         (= "torn-write" (:nemesis opts))
-                        (assoc :injection (db/torn-write-injection))))
+                        (assoc :injection (db/torn-write-injection)
+                               :arm-on-remount-only? true)))
         nodes       (if membership?
                       (vec env/all-nodes)
                       (:nodes opts))
