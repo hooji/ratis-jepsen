@@ -33,6 +33,7 @@ Knobs (environment variables):
 | `RJ_SSH_READY_TIMEOUT` | seconds to wait per node for sshd (default 120) |
 | `RJ_EXTRA_CA_BUNDLE` | path to a PEM file with the proxy's CA certificate(s), baked into the image's system **and** JVM trust stores — needed on hosts whose egress is TLS-inspected (corporate/CI proxies). Multi-cert bundles are fully supported: the Dockerfile splits the bundle one-cert-per-file, because Debian's JVM-keystore hook imports only the first cert of a file. Still pass just the extra CA(s), not a full system bundle: the content travels as a single docker build-arg, so `run.sh` pre-flights the file (readable, contains a PEM cert, ≤ 64 KiB) and refuses oversized input before docker can fail with a cryptic `Argument list too long` |
 | `RJ_DOCKER_BUILD_ARGS` | extra arguments appended verbatim to `docker build` |
+| `RJ_RATIS_REPO_URL` | extra Maven repository for Ratis artifacts not (yet) on Central — e.g. the Apache staging repo while a release candidate is under vote. `run.sh test` passes it to the SUT build (`-Dratis.repo.url`, activating the pom's `extra-ratis-repo` profile) and adds it to the harness's dependency resolution (`-Sdeps :mvn/repos`), so `--ratis-version`/`--mixed-version` runs can target staged versions (Job 12) |
 | `RJ_STARTUP_DEADLINE`, `RJ_LEADER_DEADLINE`, `RJ_LEADER_SETTLE`, `RJ_STOP_DEADLINE` | validate.sh deadlines (seconds) |
 
 Network note: the image build (apt + Clojure CLI download) and the first

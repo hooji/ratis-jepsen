@@ -139,6 +139,13 @@
                               (contains? #{"unsync-drop" "unsync-drop-all"
                                            "torn-write"}
                                          (:nemesis opts))})
+                           ;; Job 12's law: a dedicated rolling-upgrade
+                           ;; run must prove every voter rolled old→new
+                           ;; and came back.
+                           :rolling-upgrade-evidence
+                           (rj-checker/rolling-upgrade-evidence
+                             {:require-evidence?
+                              (= "rolling-upgrade" (:nemesis opts))})
                            :stats      (checker/stats)
                            :exceptions (checker/unhandled-exceptions)}
                     gnuplot? (assoc :perf (checker/perf))))}))

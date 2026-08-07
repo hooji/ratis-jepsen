@@ -51,9 +51,17 @@
   repo is mounted at /ratis-jepsen in the env topology)."
   "/ratis-jepsen/sut/ratis-kv/target")
 
-(def tarball-name-pattern
-  "Matches SUT tarball file names, e.g. ratis-kv-0.1.0-SNAPSHOT.tar.gz."
-  #"ratis-kv-.*\.tar\.gz")
+(defn tarball-name-pattern
+  "Matches SUT tarball file names for one Ratis version (Job 12: the
+  assembly name carries the version under test), e.g.
+  ratis-kv-0.1.0-SNAPSHOT-ratis-3.2.2.tar.gz for \"3.2.2\". Tarballs for
+  different Ratis versions coexist in target/ and a run selects exactly
+  its --ratis-version's — never lexicographically-latest across
+  versions, which would silently test the wrong SUT."
+  [ratis-version]
+  (re-pattern (str "ratis-kv-.*-ratis-"
+                   (java.util.regex.Pattern/quote ratis-version)
+                   "\\.tar\\.gz")))
 
 (def remote-tarball-path
   "Scratch location the tarball is uploaded to on each db node."
@@ -123,17 +131,21 @@
   (boolean (some-> (:membership-state test) deref :dynamic (contains? node))))
 
 (defn select-tarball
-  "Picks the SUT tarball from a seq of file names. Exactly one match is
-  the expected case; several (stale versions lying around) picks the
-  lexicographically last and warns via the returned map; none throws.
-  Returns {:name chosen :warning <string-or-nil>}."
-  [names]
-  (let [matches (sort (filter #(re-matches tarball-name-pattern %) names))]
+  "Picks the SUT tarball for `ratis-version` from a seq of file names.
+  Exactly one match is the expected case; several (stale SUT builds at
+  the same Ratis version) picks the lexicographically last and warns via
+  the returned map; none throws — with the exact build command for the
+  missing version. Returns {:name chosen :warning <string-or-nil>}."
+  [names ratis-version]
+  (let [pattern (tarball-name-pattern ratis-version)
+        matches (sort (filter #(re-matches pattern %) names))]
     (case (count matches)
-      0 (throw (ex-info (str "no SUT tarball matching " tarball-name-pattern
+      0 (throw (ex-info (str "no SUT tarball matching " pattern
                              " — build it first: sut/ratis-kv/mvnw -f "
-                             "sut/ratis-kv/pom.xml -q install")
-                        {:candidates (vec names)}))
+                             "sut/ratis-kv/pom.xml -q package"
+                             " -Dratis.version=" ratis-version)
+                        {:candidates (vec names)
+                         :ratis-version ratis-version}))
       1 {:name (first matches) :warning nil}
       {:name (last matches)
        :warning (str "multiple SUT tarballs " (vec matches)
@@ -144,11 +156,12 @@
 ;; ---------------------------------------------------------------------------
 
 (defn find-tarball!
-  "Resolves the tarball on the control node's filesystem."
-  ^File []
+  "Resolves the tarball for `ratis-version` on the control node's
+  filesystem."
+  ^File [ratis-version]
   (let [dir   (File. ^String tarball-dir)
         names (or (seq (map #(.getName ^File %) (.listFiles dir))) [])
-        {:keys [name warning]} (select-tarball names)]
+        {:keys [name warning]} (select-tarball names ratis-version)]
     (when warning (log/warn warning))
     (File. dir ^String name)))
 
@@ -161,6 +174,67 @@
   (c/upload (.getPath ^File tarball) remote-tarball-path)
   (c/exec :tar :-xzf remote-tarball-path :-C env/install-dir)
   (c/exec :rm :-f remote-tarball-path))
+
+;; ---------------------------------------------------------------------------
+;; Mixed-version install (Job 12, M5). In --mixed-version runs every node
+;; carries BOTH versions unpacked side by side and the contract install
+;; dir becomes a symlink to the node's active one:
+;;
+;;   /opt/ratis-kv-versions/<version>/   both tarballs, unpacked
+;;   /opt/ratis-kv -> /opt/ratis-kv-versions/<active>
+;;
+;; The process contract is untouched — bin-path still resolves through
+;; /opt/ratis-kv, so start!/kill!/every nemesis work unchanged — and
+;; switching a node's version is one symlink flip plus the ordinary
+;; restart path (the rolling-upgrade nemesis's whole move). Single-version
+;; runs keep the plain directory install above, byte-identical to M0.
+;; ---------------------------------------------------------------------------
+
+(def versions-dir
+  "Parent of the per-version unpacked trees on each db node (mixed-version
+  runs only; harness-internal, not part of the DESIGN 2.6 contract)."
+  "/opt/ratis-kv-versions")
+
+(defn version-install-dir
+  "Where one version's tarball is unpacked in mixed-version mode."
+  [ratis-version]
+  (str versions-dir "/" ratis-version))
+
+(defn install-mixed!
+  "Uploads and unpacks one tarball per version into versions-dir and
+  points the contract install dir (as a symlink) at `active-version`.
+  `tarball-of` is a map version -> control-side File."
+  [tarball-of active-version]
+  (c/exec :rm :-rf env/install-dir versions-dir)
+  (doseq [[version ^File tarball] tarball-of]
+    (let [dir (version-install-dir version)]
+      (c/exec :mkdir :-p dir)
+      (c/upload (.getPath tarball) remote-tarball-path)
+      (c/exec :tar :-xzf remote-tarball-path :-C dir)
+      (c/exec :rm :-f remote-tarball-path)))
+  (c/exec :ln :-sfn (version-install-dir active-version) env/install-dir))
+
+(defn switch-version!
+  "Repoints the current node's active-version symlink (the rolling
+  upgrade's version flip; the caller kills the SUT before and restarts it
+  after). Throws if the version was never installed on this node — a
+  roll must not silently start a half-installed tree."
+  [ratis-version]
+  (let [dir (version-install-dir ratis-version)]
+    (c/exec :test :-x (str dir "/bin/ratis-kv"))
+    (c/exec :ln :-sfn dir env/install-dir)))
+
+(defn active-version!
+  "The version the current node's install symlink points at, or nil on a
+  plain (single-version) install."
+  []
+  (let [out (try (c/exec :readlink env/install-dir)
+                 (catch Exception _ ""))]
+    (when-let [[_ v] (re-find (re-pattern (str "^"
+                                               (java.util.regex.Pattern/quote versions-dir)
+                                               "/(.+)$"))
+                              (str/trim out))]
+      v)))
 
 (defn- log-content
   "Current contents of the node's log, or \"\" before the file exists."
@@ -704,14 +778,24 @@
 ;; Jepsen DB
 ;; ---------------------------------------------------------------------------
 
-(defrecord RatisKvDB [seed-bug retry-cache-expiry-ms durability?]
+(defrecord RatisKvDB [seed-bug retry-cache-expiry-ms durability?
+                      ratis-version mixed-versions]
   jdb/DB
   ;; Durability runs mount lazyfs BEFORE the SUT first starts (the storage
   ;; dir must already be the mount when RECOVER opens it) and the mount
   ;; then outlives every kill/restart cycle — only teardown and the
   ;; torn-write remount touch it.
+  ;;
+  ;; Mixed-version runs (Job 12) unpack BOTH versions and symlink the
+  ;; contract install dir at this node's starting version, read from the
+  ;; test map's :version-state atom (created by core.clj: the static
+  ;; old/new split, or all-old for rolling-upgrade runs).
   (setup! [this test node]
-    (install! (find-tarball!))
+    (if mixed-versions
+      (install-mixed! (into {} (map (juxt identity find-tarball!))
+                            mixed-versions)
+                      (get @(:version-state test) node))
+      (install! (find-tarball! ratis-version)))
     (when durability? (mount-lazyfs! node))
     (jdb/start! this test node)
     (await-startup! node))
@@ -751,12 +835,21 @@
   (resume! [_this _test _node]
     (resume!*)))
 
+(def default-ratis-version
+  "The Ratis version a run tests when --ratis-version is not given: the
+  evaluated pin (PLAN Q15). The single source of the default — core.clj's
+  CLI option and the no-argument db constructors both read it."
+  "3.2.2")
+
 (defn db
   "The ratis-kv DB; pass a seed-bug mode name (e.g. \"stale-reads\") to
   start every node with that deliberately seeded SUT bug, and/or a
   retry-cache expiry override in ms (Job 09/Q14 — nil leaves the Ratis
   default), and/or durability? (Job 11/M4 — every node's storage on a
-  proven lazyfs mount)."
+  proven lazyfs mount), and/or the Ratis version whose SUT tarball to
+  install (Job 12/M5 — default the 3.2.2 pin) plus, for mixed-version
+  topologies, the [old new] version pair (both installed; each node
+  starts at the version the test map's :version-state assigns it)."
   ([]
    (db nil))
   ([seed-bug]
@@ -764,4 +857,8 @@
   ([seed-bug retry-cache-expiry-ms]
    (db seed-bug retry-cache-expiry-ms false))
   ([seed-bug retry-cache-expiry-ms durability?]
-   (RatisKvDB. seed-bug retry-cache-expiry-ms (boolean durability?))))
+   (db seed-bug retry-cache-expiry-ms durability? default-ratis-version nil))
+  ([seed-bug retry-cache-expiry-ms durability? ratis-version mixed-versions]
+   (RatisKvDB. seed-bug retry-cache-expiry-ms (boolean durability?)
+               (or ratis-version default-ratis-version)
+               (when (seq mixed-versions) (vec mixed-versions)))))

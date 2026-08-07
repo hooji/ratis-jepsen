@@ -894,3 +894,77 @@
                    (map (fn [node] [node (node-lazyfs-log-content test node)]))
                    (:nodes test)))
            (torn-restart-results history)))))))
+
+;; ---------------------------------------------------------------------------
+;; Rolling-upgrade evidence (Job 12, M5). The law, same shape as the
+;; others: a dedicated rolling-upgrade run must PROVE the upgrade
+;; happened — every voter rolled old→new exactly once and came back (a
+;; NEW startup line awaited by the nemesis) — because a green run whose
+;; rolls all silently failed would prove nothing about wire
+;; compatibility. Judged from the history's :roll completion values.
+;; ---------------------------------------------------------------------------
+
+(defn roll-results
+  "The recorded :roll completion values from a history (a completion
+  carries a map value; invocations carry none). Skips included."
+  [history]
+  (->> history
+       (remove client-op?)
+       (filter #(= :roll (:f %)))
+       (keep :value)
+       (filterv map?)))
+
+(defn rolling-upgrade-verdict
+  "Pure: the rolling-evidence decision over the run's node list and its
+  recorded :roll values. Required ⇒ every node must have one applied
+  roll (:await :started); a roll that failed its await (or errored)
+  convicts, as does an unrolled node; post-completion :all-rolled skips
+  are legal."
+  [require? nodes rolls]
+  (let [applied (filterv #(and (:node %) (= :started (:await %))) rolls)
+        failed  (filterv #(and (:node %) (not= :started (:await %))) rolls)
+        skips   (filterv :skip rolls)
+        rolled  (set (map :node applied))
+        missing (vec (remove rolled nodes))
+        base    {:rolls-applied (mapv #(select-keys % [:node :from :to :active])
+                                      applied)
+                 :rolls-failed  failed
+                 :roll-skips    (count skips)
+                 :nodes-missing missing}]
+    (cond
+      (not require?)
+      (assoc base :valid? true
+             :note "rolling evidence not required for this run")
+
+      (seq failed)
+      (assoc base :valid? false
+             :error :roll-failed
+             :note (str "roll(s) did not come back: "
+                        (pr-str (mapv #(select-keys % [:node :await]) failed))
+                        " — the upgraded node never re-emitted the contract "
+                        "startup line"))
+
+      (seq missing)
+      (assoc base :valid? false
+             :error :incomplete-rolling-upgrade
+             :note (str "nodes never rolled: " (pr-str missing)
+                        " — the run ended before the upgrade completed; "
+                        "raise --time-limit or shrink --roll-calm-s/"
+                        "--roll-gap-s"))
+
+      :else
+      (assoc base :valid? true))))
+
+(defn rolling-upgrade-evidence
+  "The rolling-upgrade evidence checker. Composed unconditionally into
+  the register stack; counts always reported; REQUIRED only when
+  :require-evidence? (the workload sets it for the dedicated
+  rolling-upgrade kind)."
+  ([] (rolling-upgrade-evidence {}))
+  ([opts]
+   (let [require? (boolean (:require-evidence? opts))]
+     (reify checker/Checker
+       (check [_this test history _copts]
+         (rolling-upgrade-verdict require?
+                                  (vec (:nodes test))
+                                  (roll-results history)))))))

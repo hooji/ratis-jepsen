@@ -741,3 +741,52 @@
                      false true torn-ev [{:outcome :started}])))
       (is (:valid? (checker/durability-verdict
                      false true torn-ev [{:outcome :wedged}]))))))
+
+;; ---------------------------------------------------------------------------
+;; Rolling-upgrade evidence (Job 12)
+;; ---------------------------------------------------------------------------
+
+(def voters ["n1" "n2" "n3" "n4" "n5"])
+
+(defn- ok-roll [n] {:node n :from "3.2.2" :to "3.3.0" :await :started
+                    :active "3.3.0"})
+
+(deftest rolling-upgrade-verdict-decisions
+  (testing "all five rolled and back -> valid"
+    (let [v (checker/rolling-upgrade-verdict true voters (mapv ok-roll voters))]
+      (is (true? (:valid? v)))
+      (is (= [] (:nodes-missing v)))
+      (is (= 5 (count (:rolls-applied v))))))
+  (testing "post-completion skips are legal"
+    (is (true? (:valid? (checker/rolling-upgrade-verdict
+                          true voters
+                          (conj (mapv ok-roll voters)
+                                {:skip :all-rolled}))))))
+  (testing "a roll that never came back convicts"
+    (let [rolls (conj (mapv ok-roll (butlast voters))
+                      {:node "n5" :from "3.2.2" :to "3.3.0"
+                       :await :no-new-startup-line})
+          v     (checker/rolling-upgrade-verdict true voters rolls)]
+      (is (false? (:valid? v)))
+      (is (= :roll-failed (:error v)))))
+  (testing "an unrolled node convicts (run ended early)"
+    (let [v (checker/rolling-upgrade-verdict
+              true voters (mapv ok-roll (butlast voters)))]
+      (is (false? (:valid? v)))
+      (is (= :incomplete-rolling-upgrade (:error v)))
+      (is (= ["n5"] (:nodes-missing v)))))
+  (testing "not required -> always valid, counts still reported"
+    (let [v (checker/rolling-upgrade-verdict false voters [])]
+      (is (true? (:valid? v)))
+      (is (= voters (:nodes-missing v))))))
+
+(deftest roll-results-extraction
+  (let [history [{:type :invoke :process 0 :f :read :value nil}
+                 {:type :info :process :nemesis :f :roll}          ; invocation
+                 {:type :info :process :nemesis :f :roll
+                  :value (ok-roll "n1")}                           ; completion
+                 {:type :ok :process 0 :f :read :value 1}
+                 {:type :info :process :nemesis :f :roll
+                  :value {:skip :all-rolled}}]]
+    (is (= [(ok-roll "n1") {:skip :all-rolled}]
+           (checker/roll-results history)))))

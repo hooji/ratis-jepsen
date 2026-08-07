@@ -497,3 +497,136 @@ pays it); DB setup per durability run is **6–8 s** vs **4.7 s** plain —
 the five 128 MiB cache pre-allocations run in parallel and cost ~2–3 s
 total, far below the spike's 8 s/GiB-per-mount worry because the cache
 is sized deliberately (see `db/lazyfs-cache-size`).
+
+## 2026-08-07 — M5 gates: version matrix 3.2.2 vs 3.3.0 RC2, mixed-version topology (Job 12)
+
+- **Commands**: `env/run.sh test --nemesis <kind> --time-limit 300
+  --ratis-version <V>` (counter: `--workload counter`; listener probe:
+  `--time-limit 180`; mixed rows: `--mixed-version 3.2.2,3.3.0`;
+  probes: `env/run.sh probe --ratis-version <V>`). Every 3.3.0-bearing
+  invocation ran with
+  `RJ_RATIS_REPO_URL=https://repository.apache.org/content/repositories/orgapacheratis-1182/`.
+- **Versions**: ratis 3.2.2 (Central) and **3.3.0 RC2** (the staging
+  repo above; version string `3.3.0`), jepsen 0.3.13, SUT `ratis-kv
+  0.1.0-SNAPSHOT` (no source change between versions — the SUT and its
+  51-test suite build green at both), JDK 21. **3.3.0 is NOT a
+  completed release as of 2026-08-07**: absent from Maven Central and
+  `downloads.apache.org/ratis` (both fresh — checked against
+  same-day artifacts elsewhere); present as `rc2` under
+  `dist.apache.org/repos/dist/dev/ratis/3.3.0/` with the staging repo's
+  `ratis-server-3.3.0.jar` byte-identical (sha512) to the jar inside
+  the dev area's sha512-verified `apache-ratis-3.3.0-bin.tar.gz`. What
+  we tested is exactly the bits under vote.
+- **Harness client**: matched to the server under test per run by
+  `env/run.sh` (`-Sdeps :override-deps`); recorded in each store as
+  `:harness-ratis-client`; mixed runs run the OLD client (clients
+  upgrade last). The in-harness skew guard was negatively tested: a
+  deliberately mismatched launch (3.2.2 classpath, `--ratis-version
+  3.3.0`) refuses with the `version skew` error before touching any
+  node.
+
+**Parameterization baseline (no regression)**: register + partition at
+3.2.2 through the new plumbing — exit 0, 313 s wall, 1.2 s analysis,
+1118 / 378 / 4 (ok/fail/info), store
+`ratis-kv-register-partition-ratis-3.2.2/20260807T134626.186Z` —
+matching its M0/M1 ledger shape (e.g. 2026-08-05 partition row
+1089/408/3).
+
+**The 3.3.0 suite — all eight runs green, no behavioral difference
+surfaced** (exit 0 and every composed checker `:valid? true`
+throughout; analysis 0.9–1.5 s per run; `:info` sanity spot-checked on
+the counter run — 66 of 66 `:info` adds inside the ten kill windows
+(+6 s completion tail); wall times below include node install/boot):
+
+| Run @3.3.0 RC2 | Exit | Wall | ok / fail / info | Evidence | Store (`20260807T…`) |
+|---|---|---|---|---|---|
+| register + partition | 0 | 323 s | 1093 / 407 / 0 | — | `…partition-ratis-3.3.0/135646.129Z` |
+| register + crash | 0 | 316 s | 1092 / 408 / 0 | — | `…crash-ratis-3.3.0/140159.982Z` |
+| register + mixed-all | 0 | 316 s | 1104 / 396 / 0 | conf changes seen | `…mixed-all-ratis-3.3.0/140715.780Z` |
+| counter + crash | 0 | 315 s | 1991 / 0 / 66 | retries 459 / 181 ops, exactly-once held | `…counter-crash-ratis-3.3.0/141232.015Z` |
+| snapshot-churn | 0 | 313 s | 1116 / 384 / 0 | 1 install event (n5→n4, `followerNextIndex=878 < logStartIndex=1004`), receiver survived and served | `…snapshot-churn-ratis-3.3.0/141746.675Z` |
+| membership | 0 | 322 s | 1097 / 403 / 0 | 21 committed conf transitions, 5 nodes through joins | `…membership-ratis-3.3.0/142300.702Z` |
+| unsync-drop (lazyfs) | 0 | 318 s | 1117 / 383 / 0 | 14 clear-cache acks; mounts proven ×5 | `…unsync-drop-ratis-3.3.0/142822.894Z` |
+| listener-probe | 0 | 76 s | 1112 / 388 / 0 | see BACKLOG 9 below | `…listener-probe-ratis-3.3.0/143341.391Z` |
+
+**Candidate re-probes at 3.3.0 (BACKLOG 7–9)** — library probed
+deliberately (`env/run.sh probe`: in-JVM RaftServers on a naive
+`BaseStateMachine` subclass that does NOT manage the lifecycle — the
+upstream-CounterStateMachine template our fixed SUT would mask):
+
+1. **BACKLOG 7 — base-class lifecycle trap: PERSISTS at 3.3.0.**
+   Probe (both versions, same code): `sm.pause()` on the naive SM
+   leaves the lifecycle unchanged (`base-pause-reaches-paused=false`),
+   and the full live install chain (stop follower → term bump →
+   snapshot+purge → restart) still **kills the receiving division**:
+   `install-outcome=died`, division CLOSED within 5 s of the install,
+   SM never initialized, targeted reads refused — identical at 3.2.2
+   (probe validity: reproduces the Job 08 conviction) and at 3.3.0.
+   Source concurs: `BaseStateMachine.pause()` is byte-identical empty,
+   `StateMachineUpdater.reload()` still asserts PAUSED, and the
+   restructured 3.3.0 install path (`SnapshotInstallationHandler`
+   append-to-temp + finalize) still calls `stateMachine.pause()` right
+   before `reloadStateMachine`. The **install-retry no-backoff**
+   secondary also persists: with the division dead, the leader logged
+   90 `ServerNotReadyException` + 52 failed-append traces in a 30 s
+   window at 3.2.2, and **186 + 100** at 3.3.0.
+2. **BACKLOG 8 — `GroupInfoReply` conf dropped on the wire: FIXED at
+   3.3.0.** One-call check over real gRPC: 3.2.2 `conf-present=false`
+   (always `Optional.empty()`); 3.3.0 `conf-present=true` with the
+   populated configuration (`peers { id: "p1" … startupRole: FOLLOWER }`).
+   Source: 3.3.0's `ClientProtoUtils.toGroupInfoReplyProto` adds
+   `reply.getConf().ifPresent(conf -> b.setConf(conf))`. Our
+   upstream framing for this one flips to "already fixed in 3.3.0;
+   here is the test that proves it stays fixed".
+3. **BACKLOG 9 — staged LISTENER stuck in STARTING: PERSISTS at
+   3.3.0.** Job 08's probe sequence re-run verbatim: stage n7 as
+   listener (conf committed, replication to n7 confirmed from its own
+   log at conf index 892), promote to voter (committed), demote,
+   remove (all committed) — while a targeted linearizable read at n7
+   fails `ServerNotReadyException: … is not in [RUNNING]: current
+   state is STARTING` both as listener and ~12 s after promotion.
+   Source concurs: `checkStaging` (the FOLLOWER-only
+   `containsInConf(id)` caught-up mark) is byte-identical at 3.3.0.
+
+**Mixed-version topology** (expectations committed in advance at
+`687e4dc`; all met):
+
+| Run (3.2.2 old / 3.3.0-RC2 new, client on old) | Exit | Wall | ok / fail / info | Store (`20260807T…`) |
+|---|---|---|---|---|
+| register + partition, static n1–n3 old / n4–n5 new | 0 | 318 s | 1079 / 417 / 4 | `…partition-mixed-3.2.2-3.3.0/143539.884Z` |
+| register + crash, same static split | 0 | 317 s | 1119 / 370 / 11 | `…crash-mixed-3.2.2-3.3.0/144053.559Z` |
+| rolling upgrade (all-old → roll n1…n5 to new under load) | 0 | 179 s | 1083 / 417 / 0 | `…rolling-upgrade-mixed-3.2.2-3.3.0/144611.090Z` |
+
+The rolling run's evidence checker: **5/5 rolls applied, none failed,
+none missing, zero skips** — each `:roll` op records
+kill → symlink flip → restart → NEW startup line awaited, with the
+version map walking `n1…n5` from all-`3.2.2` to all-`3.3.0` (op values
+carry `:versions-now` at each step, e.g. after the third roll:
+`{"n1" "3.3.0", "n2" "3.3.0", "n3" "3.3.0", "n4" "3.2.2", "n5"
+"3.2.2"}`). Every 3.3.0 node opened its predecessor's 3.2.2-written
+raft storage in place (RECOVER); linearizability and liveness held
+through every intermediate mix, and the run's tail was the 3.2.2
+client against an all-3.3.0 cluster. The shorter wall is benign: rolls
+complete in seconds and no fault windows stretch op latencies, so the
+1500-op budget (and the finite roll script) exhaust before the 300 s
+limit. The **version-skew guard**'s negative arm also ran: launching
+the harness with a 3.2.2 classpath but `--ratis-version 3.3.0`
+refuses with `version skew: this JVM runs ratis-client 3.2.2 but the
+run wants 3.3.0` before touching any node.
+
+**Comparison table — scenario × version × outcome** (3.2.2 column =
+this ledger's earlier gates + today's baseline; every cell a real run):
+
+| Scenario | 3.2.2 | 3.3.0 RC2 | Mixed / rolling |
+|---|---|---|---|
+| register + partition | GREEN (M0 + today's baseline) | GREEN | GREEN (static mix) |
+| register + crash | GREEN (M1) | GREEN | GREEN (static mix) |
+| register + mixed-all | GREEN (M2) | GREEN | — |
+| counter + crash (exactly-once) | GREEN (M3) | GREEN | — |
+| snapshot-churn + install evidence | GREEN (M2, on the fixed SUT) | GREEN | — |
+| membership + conf evidence | GREEN (M2) | GREEN | — |
+| unsync-drop (lazyfs durability) | GREEN (M4) | GREEN | — |
+| listener-probe (BACKLOG 9) | conf mechanics pass; **staged listener never serves** | **same wedge** | — |
+| rolling upgrade 3.2.2→3.3.0 | — | — | GREEN, 5/5 rolled |
+| Library probe: base pause()/install (BACKLOG 7) | division dies; no-backoff hammering | **division dies; no-backoff hammering** (persists) | — |
+| Library probe: GroupInfoReply conf (BACKLOG 8) | dropped (empty) | **populated (fixed)** | — |

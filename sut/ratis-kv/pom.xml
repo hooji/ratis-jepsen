@@ -94,6 +94,14 @@
         <version>3.7.1</version>
         <configuration>
           <appendAssemblyId>false</appendAssemblyId>
+          <!--
+            The tarball name carries the Ratis version under test (Job 12):
+            ratis-kv-<version>-ratis-<ratis.version>.tar.gz. Tarballs for
+            different Ratis versions coexist in target/ and the harness
+            selects by its ‑‑ratis-version flag; the jar keeps the plain
+            finalName.
+          -->
+          <finalName>${project.artifactId}-${project.version}-ratis-${ratis.version}</finalName>
           <descriptors>
             <descriptor>src/assembly/dist.xml</descriptor>
           </descriptors>
@@ -110,4 +118,29 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <!--
+      Version-matrix support (Job 12): resolve Ratis artifacts from one
+      extra repository, e.g. an Apache staging repo while a release
+      candidate is under vote. Activated only when -Dratis.repo.url=... is
+      passed; the default build touches Maven Central alone.
+    -->
+    <profile>
+      <id>extra-ratis-repo</id>
+      <activation>
+        <property>
+          <name>ratis.repo.url</name>
+        </property>
+      </activation>
+      <repositories>
+        <repository>
+          <id>extra-ratis-repo</id>
+          <url>${ratis.repo.url}</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+    </profile>
+  </profiles>
 </project>

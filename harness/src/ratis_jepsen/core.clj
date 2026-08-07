@@ -30,7 +30,7 @@
                                evidence law)
     --nemesis none|partition|crash|pause|mixed|snapshot-churn|transfer|
               membership|membership-snapshot-churn|listener-probe|mixed-all|
-              unsync-drop|unsync-drop-all|torn-write
+              unsync-drop|unsync-drop-all|torn-write|rolling-upgrade
                                fault schedule (default none); crash =
                                kill -9/restart of a leader-biased random
                                minority, pause = SIGSTOP/SIGCONT,
@@ -75,6 +75,21 @@
                                where linearizable reads go (default
                                leader; follower exercises
                                sendReadOnly(msg, peerId))
+    --ratis-version V          the Ratis version under test (default
+                               3.2.2): selects the SUT tarball
+                               ratis-kv-*-ratis-V.tar.gz; env/run.sh
+                               injects the matching ratis-client into
+                               this JVM and ratis-test refuses to run on
+                               a skewed classpath (Job 12, M5)
+    --mixed-version OLD,NEW    mixed-version topology (Job 12): both
+                               versions installed on every node; static
+                               kinds split voters ceil(n/2) OLD / rest
+                               NEW, rolling-upgrade starts all-OLD and
+                               each :roll moves one voter to NEW; the
+                               harness client runs OLD (clients upgrade
+                               last). Supported kinds:
+                               none|partition|crash|pause|mixed|transfer|
+                               rolling-upgrade
     --time-limit 300           wall-clock ceiling; the op budget usually
                                exhausts first
     --key-count 5 --ops-per-key 400 --concurrency 10   the DESIGN 2.5
@@ -90,7 +105,9 @@
     --seed-bug stale-reads     start every node with the SUT's seeded bug
                                (the red-run lever; testing the harness)
     --store-dir DIR            where jepsen's store/ output lands"
-  (:require [jepsen.cli :as cli]
+  (:require [clojure.string :as str]
+            [clojure.tools.logging :as log]
+            [jepsen.cli :as cli]
             [jepsen.generator :as gen]
             [jepsen.store :as store]
             [jepsen.tests :as tests]
@@ -222,6 +239,35 @@
    [nil "--seed-bug MODE" "Start every node with a deliberately seeded SUT bug (stale-reads). Testing the harness only — a run with this flag is expected to FAIL its checker."
     :validate [#{"stale-reads"} "Must be: stale-reads"]]
 
+   ;; --- version matrix (Job 12, M5) ---------------------------------------
+   ;; The version selects which SUT tarball db.clj installs
+   ;; (ratis-kv-*-ratis-<version>.tar.gz). The harness JVM's OWN
+   ;; ratis-client/-grpc deps are fixed at launch — env/run.sh injects the
+   ;; matching versions via -Sdeps :override-deps from the same flag —
+   ;; and ratis-test refuses to run when the classpath disagrees with the
+   ;; requested version (the version-skew guard).
+   [nil "--ratis-version VERSION" "The Ratis version under test: which SUT tarball to install (and, via env/run.sh, which ratis-client the harness itself runs)"
+    :default db/default-ratis-version
+    :validate [#(re-matches #"[0-9A-Za-z._-]+" %)
+               "Must be a plain version token, e.g. 3.2.2"]]
+
+   [nil "--mixed-version OLD,NEW" "Mixed-version topology: install BOTH versions on every node; static kinds split the voters old/new (first ceil(n/2) nodes old), rolling-upgrade starts all-old and rolls each voter to NEW during the run. The harness client runs OLD (clients upgrade last). Overrides --ratis-version."
+    :parse-fn (fn [s] (mapv str/trim (str/split s #"," 3)))
+    :validate [#(and (= 2 (count %))
+                     (every? (fn [v] (re-matches #"[0-9A-Za-z._-]+" v)) %)
+                     (apply not= %))
+               "Must be two distinct version tokens: OLD,NEW"]]
+
+   [nil "--roll-calm-s SECONDS" "Rolling upgrade: calm all-old stretch before the first roll"
+    :default (:calm-s nemesis/default-rolling-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
+   [nil "--roll-gap-s SECONDS" "Rolling upgrade: settle gap after each roll"
+    :default (:gap-s nemesis/default-rolling-cycle)
+    :parse-fn #(Long/parseLong %)
+    :validate [pos? "Must be positive"]]
+
    [nil "--durability" "Mount every node's raft storage as lazyfs (Job 11/M4 storage-durability topology), proving the mount per node and failing the run loudly if it cannot. Forced on by the durability nemeses (unsync-drop, unsync-drop-all, torn-write)."]
 
    [nil "--torn-persist-part PART" "torn-write only: which third of the torn write reaches the backing store. 1 (default) keeps the head — the truest sequential power loss, biasing recovery toward clean tail truncation; 2 keeps a middle fragment behind a zero hole, biasing recovery toward the loud CorruptionPolicy=EXCEPTION refusal. Both outcomes are legal and recorded."
@@ -244,6 +290,83 @@
     :default 300
     :parse-fn #(Long/parseLong %)
     :validate [pos? "Must be positive"]]])
+
+;; ---------------------------------------------------------------------------
+;; Version matrix (Job 12, M5)
+;; ---------------------------------------------------------------------------
+
+(defn classpath-ratis-client-version
+  "The ratis-client version actually on this JVM's classpath, parsed
+  from the Maven-repo jar path (…/ratis-client/<v>/ratis-client-<v>.jar),
+  or nil when no such jar is found (e.g. a source-tree classpath)."
+  ([] (classpath-ratis-client-version
+        (System/getProperty "java.class.path")
+        (System/getProperty "path.separator")))
+  ([classpath separator]
+   (some #(second (re-find #"ratis-client-([0-9][^/\\]*)\.jar$" %))
+         (str/split (or classpath "")
+                    (re-pattern (java.util.regex.Pattern/quote separator))))))
+
+(defn check-client-version!
+  "The version-skew guard: the harness's own ratis-client dependency must
+  match the server under test — the run's --ratis-version, or the OLD
+  half of a mixed pair (rolling-upgrade convention: clients upgrade
+  last). env/run.sh injects the right client via -Sdeps :override-deps;
+  this refuses to run when that didn't happen, because a skewed client
+  would silently test the wrong client stack. Returns the classpath
+  version (nil, with a loud warning, when no jar is recognizable)."
+  [expected]
+  (let [actual (classpath-ratis-client-version)]
+    (cond
+      (nil? actual)
+      (log/warn "cannot determine the classpath ratis-client version —"
+                "proceeding, but the harness client is unverified"
+                "(expected" expected ")")
+
+      (not= actual expected)
+      (throw (ex-info
+               (str "version skew: this JVM runs ratis-client " actual
+                    " but the run wants " expected
+                    " — launch through env/run.sh test (it injects matching"
+                    " client deps via -Sdeps), or pass a matching"
+                    " --ratis-version/--mixed-version")
+               {:classpath-ratis-client actual
+                :expected expected})))
+    actual))
+
+(def mixed-version-kinds
+  "The fault schedules a --mixed-version run supports: the wire-compat
+  set (Job 12 deliverable 4). Everything else is refused loudly — the
+  membership kinds move nodes through pool wipes and --join bootstraps
+  that the per-node version symlinks have never been exercised against,
+  and the durability kinds add a storage stack whose interaction with
+  mid-run version flips is untested."
+  #{"none" "partition" "crash" "pause" "mixed" "transfer"
+    "rolling-upgrade"})
+
+(defn initial-version-map
+  "Node -> starting Ratis version for a run. Single-version: everything
+  at ratis-version. Mixed static split: the first ceil(n/2) nodes (in
+  the given order) run OLD, the rest NEW — majority-old, so both
+  old-leader→new-follower and (after elections/transfers)
+  new-leader→old-follower appends occur. Rolling upgrade: every node
+  starts OLD; the :roll ops move them to NEW one at a time."
+  [nodes ratis-version mixed-versions rolling?]
+  (let [nodes (vec nodes)]
+    (cond
+      (nil? mixed-versions)
+      (zipmap nodes (repeat ratis-version))
+
+      rolling?
+      (zipmap nodes (repeat (first mixed-versions)))
+
+      :else
+      (let [[old new] mixed-versions
+            n-old     (Math/ceil (/ (count nodes) 2.0))]
+        (into {}
+              (map-indexed (fn [i node]
+                             [node (if (< i n-old) old new)])
+                           nodes))))))
 
 (defn workload-defaults
   "Fills :rate and :ops-per-key when the CLI left them unset — per kind:
@@ -304,6 +427,32 @@
         durability-kind? (contains? nemesis/durability-kinds (:nemesis opts))
         durability? (boolean (or (:durability opts) durability-kind?))
         opts        (assoc opts :durability durability?)
+        ;; Version matrix (Job 12): a mixed pair overrides the single
+        ;; version; the harness's own client must match the single
+        ;; version / the pair's OLD half (clients upgrade last), which
+        ;; check-client-version! enforces against the real classpath.
+        mixed       (:mixed-version opts)
+        rolling?    (= "rolling-upgrade" (:nemesis opts))
+        _           (when (and rolling? (not mixed))
+                      (throw (ex-info (str "--nemesis rolling-upgrade needs "
+                                           "--mixed-version OLD,NEW — a roll "
+                                           "with one version is just a "
+                                           "restart")
+                                      {:nemesis (:nemesis opts)})))
+        _           (when (and mixed
+                               (not (contains? mixed-version-kinds
+                                               (:nemesis opts))))
+                      (throw (ex-info (str "--mixed-version supports nemeses "
+                                           (str/join "|" (sort mixed-version-kinds))
+                                           " only (got " (:nemesis opts) ")")
+                                      {:nemesis (:nemesis opts)})))
+        _           (when (and mixed durability?)
+                      (throw (ex-info (str "--mixed-version cannot compose "
+                                           "with the lazyfs durability "
+                                           "topology (untested interaction)")
+                                      {})))
+        client-version (if mixed (first mixed) (:ratis-version opts))
+        harness-client (check-client-version! client-version)
         nodes       (if membership?
                       (vec env/all-nodes)
                       (:nodes opts))
@@ -313,6 +462,11 @@
            opts
            {:name      (str "ratis-kv-" (:workload opts)
                             "-" (:nemesis opts)
+                            ;; the version under test is part of the run's
+                            ;; identity (the matrix ledger keys on it)
+                            (if mixed
+                              (str "-mixed-" (first mixed) "-" (second mixed))
+                              (str "-ratis-" (:ratis-version opts)))
                             ;; durability-kind names already say it
                             (when (and durability? (not durability-kind?))
                               "-durability")
@@ -320,13 +474,20 @@
                               (str "-seedbug-" (:seed-bug opts))))
             :nodes     nodes
             :db        (db/db (:seed-bug opts) (:retry-cache-expiry-ms opts)
-                              durability?)
+                              durability? (:ratis-version opts) mixed)
             :client    (client/client)
             :nemesis   (:nemesis nem)
             :checker   (:checker workload)
             :generator (->> (:generator workload)
                             (gen/nemesis (:generator nem))
-                            (gen/time-limit (:time-limit opts)))}
+                            (gen/time-limit (:time-limit opts)))
+            ;; recorded into the store: what the harness JVM actually ran
+            :harness-ratis-client harness-client}
+           (when mixed
+             {:mixed-versions mixed
+              :version-state  (atom (initial-version-map
+                                      nodes (:ratis-version opts)
+                                      mixed rolling?))})
            (when membership?
              {:membership-state
               (atom (nemesis/initial-membership-state

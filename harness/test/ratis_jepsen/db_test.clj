@@ -136,20 +136,46 @@
       (is (nil? (db/parse-conf-line "set configuration but not really"))))))
 
 (deftest tarball-selection
-  (testing "exactly one match"
-    (is (= {:name "ratis-kv-0.1.0-SNAPSHOT.tar.gz" :warning nil}
-           (db/select-tarball ["ratis-kv-0.1.0-SNAPSHOT.tar.gz"
+  (testing "exactly one match for the requested version"
+    (is (= {:name "ratis-kv-0.1.0-SNAPSHOT-ratis-3.2.2.tar.gz" :warning nil}
+           (db/select-tarball ["ratis-kv-0.1.0-SNAPSHOT-ratis-3.2.2.tar.gz"
                                "ratis-kv-0.1.0-SNAPSHOT.jar"
-                               "classes"]))))
-  (testing "multiple matches: lexicographically last, with a warning"
+                               "classes"]
+                              "3.2.2"))))
+  (testing "versions coexist: each request picks exactly its own"
+    (let [names ["ratis-kv-0.1.0-SNAPSHOT-ratis-3.2.2.tar.gz"
+                 "ratis-kv-0.1.0-SNAPSHOT-ratis-3.3.0.tar.gz"]]
+      (is (= "ratis-kv-0.1.0-SNAPSHOT-ratis-3.2.2.tar.gz"
+             (:name (db/select-tarball names "3.2.2"))))
+      (is (= "ratis-kv-0.1.0-SNAPSHOT-ratis-3.3.0.tar.gz"
+             (:name (db/select-tarball names "3.3.0"))))
+      (is (nil? (:warning (db/select-tarball names "3.2.2"))))))
+  (testing "the version is regex-quoted: dots never match wild"
+    ;; a 3.2.2 request must not match a hypothetical 3x2x2 name
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (db/select-tarball ["ratis-kv-0.1.0-SNAPSHOT-ratis-3x2x2.tar.gz"]
+                                    "3.2.2"))))
+  (testing "multiple SUT builds at one version: lexicographically last + warning"
     (let [{:keys [name warning]}
-          (db/select-tarball ["ratis-kv-0.1.0-SNAPSHOT.tar.gz"
-                              "ratis-kv-0.2.0-SNAPSHOT.tar.gz"])]
-      (is (= "ratis-kv-0.2.0-SNAPSHOT.tar.gz" name))
+          (db/select-tarball ["ratis-kv-0.1.0-SNAPSHOT-ratis-3.2.2.tar.gz"
+                              "ratis-kv-0.2.0-SNAPSHOT-ratis-3.2.2.tar.gz"]
+                             "3.2.2")]
+      (is (= "ratis-kv-0.2.0-SNAPSHOT-ratis-3.2.2.tar.gz" name))
       (is (some? warning))))
-  (testing "no match throws with build instructions"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"build it first"
-                          (db/select-tarball ["ratis-kv-0.1.0-SNAPSHOT.jar"])))))
+  (testing "no match throws with the version-specific build command"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"build it first.*-Dratis\.version=3\.3\.0"
+                          (db/select-tarball
+                            ["ratis-kv-0.1.0-SNAPSHOT-ratis-3.2.2.tar.gz"]
+                            "3.3.0")))))
+
+(deftest version-install-paths
+  (testing "per-version install dirs and the pattern round-trip"
+    (is (= "/opt/ratis-kv-versions/3.3.0" (db/version-install-dir "3.3.0")))
+    (is (re-matches (db/tarball-name-pattern "3.3.0")
+                    "ratis-kv-0.1.0-SNAPSHOT-ratis-3.3.0.tar.gz"))
+    (is (not (re-matches (db/tarball-name-pattern "3.3.0")
+                         "ratis-kv-0.1.0-SNAPSHOT-ratis-3.2.2.tar.gz")))))
 
 ;; ---------------------------------------------------------------------------
 ;; The startup-line regex (the boot-await signal, DESIGN 2.6)

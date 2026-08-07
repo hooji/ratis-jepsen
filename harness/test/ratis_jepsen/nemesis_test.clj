@@ -26,7 +26,8 @@
   (is (= #{"none" "partition" "crash" "pause" "mixed"
            "snapshot-churn" "transfer" "membership"
            "membership-snapshot-churn" "listener-probe" "quorum-pause"
-           "mixed-all" "unsync-drop" "unsync-drop-all" "torn-write"}
+           "mixed-all" "unsync-drop" "unsync-drop-all" "torn-write"
+           "rolling-upgrade"}
          nemesis/kinds))
   (testing "durability kinds are CLI kinds and only those three"
     (is (= #{"unsync-drop" "unsync-drop-all" "torn-write"}
@@ -56,7 +57,7 @@
     (is (= #{:churn-transfer :churn-snapshot :transfer
              :member-add :member-remove
              :listener-add :listener-census :listener-promote
-             :listener-demote :listener-remove}
+             :listener-demote :listener-remove :roll}
            nemesis/action-fs))
     (is (empty? (set/intersection nemesis/action-fs
                                   (set/union nemesis/fault-fs
@@ -454,3 +455,33 @@
             2 selects the refusal-biased hole shape)"
     (is (= 3 nemesis/torn-parts))
     (is (= 1 nemesis/default-torn-persist-part))))
+
+;; ---------------------------------------------------------------------------
+;; Rolling upgrade (Job 12)
+;; ---------------------------------------------------------------------------
+
+(deftest roll-target-selection
+  (let [nodes ["n1" "n2" "n3" "n4" "n5"]]
+    (testing "first still-old node in contract order"
+      (is (= "n1" (nemesis/roll-target {"n1" "3.2.2" "n2" "3.2.2"
+                                        "n3" "3.2.2" "n4" "3.2.2"
+                                        "n5" "3.2.2"}
+                                       nodes "3.2.2")))
+      (is (= "n3" (nemesis/roll-target {"n1" "3.3.0" "n2" "3.3.0"
+                                        "n3" "3.2.2" "n4" "3.2.2"
+                                        "n5" "3.2.2"}
+                                       nodes "3.2.2"))))
+    (testing "everything rolled -> nil"
+      (is (nil? (nemesis/roll-target (zipmap nodes (repeat "3.3.0"))
+                                     nodes "3.2.2"))))))
+
+(deftest rolling-upgrade-script-shape
+  (let [cs     (nemesis/cycles {})
+        script (nemesis/rolling-upgrade-script cs)
+        rolls  (filter #(= :roll (:f %)) (remove nil? (map #(when (map? %) %) script)))]
+    (testing "one :roll per initial voter, no heals (the op blocks through its own downtime)"
+      (is (= 5 (count rolls)))
+      (is (every? #(= :info (:type %)) rolls)))
+    (testing ":roll is an action: never in fault->heal, listed in action-fs"
+      (is (not (contains? nemesis/fault->heal :roll)))
+      (is (contains? nemesis/action-fs :roll)))))

@@ -28,6 +28,14 @@
   ;; absence is a hard ExceptionInInitializerError, not a no-op —
   ;; ratis-client pulls neither transitively (both found the hard way in
   ;; Job 04's first cluster runs).
+  ;;
+  ;; Version matrix (Job 12): these pins are the DEFAULT. A --ratis-version
+  ;; run must match the harness client to the server under test, which
+  ;; env/run.sh does at launch via -Sdeps {:aliases {:sut-ratis
+  ;; {:override-deps {...}}}} over these three coordinates (deps.edn is
+  ;; static — JVM deps cannot change after start, so the flag's owner is
+  ;; the launcher, not the CLI). core.clj's check-client-version! then
+  ;; refuses to run if the real classpath disagrees with the flag.
   org.apache.ratis/ratis-client {:mvn/version "3.2.2"}
   org.apache.ratis/ratis-grpc {:mvn/version "3.2.2"}
   org.apache.ratis/ratis-metrics-default {:mvn/version "3.2.2"}}
@@ -53,4 +61,14 @@
     io.github.cognitect-labs/test-runner
     {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
    :main-opts ["-m" "cognitect.test-runner"]
-   :exec-fn cognitect.test-runner.api/test}}}
+   :exec-fn cognitect.test-runner.api/test}
+
+  ;; The Job 12 library probe (BACKLOG 7/8 at an arbitrary version):
+  ;; in-JVM RaftServers on a deliberately naive BaseStateMachine subclass
+  ;; — needs ratis-server, which the harness proper never depends on.
+  ;; The version comes from the same -Sdeps :override-deps injection as
+  ;; everything else (env/run.sh probe); the pin below is the default.
+  :probe
+  {:extra-paths ["probe"]
+   :extra-deps {org.apache.ratis/ratis-server {:mvn/version "3.2.2"}}
+   :main-opts ["-m" "ratis-jepsen.probe.lifecycle"]}}}
