@@ -115,7 +115,12 @@ the owner's machine and uses `gh` directly.
   verdict lands.
 - Run artifacts (`store/`, `target/`, caches) never enter PRs — see
   `.gitignore`; reference runs are summarized in `docs/RUNS.md`, not
-  committed.
+  committed. **One standing exception (owner, 2026-08-06):** the
+  published-reference-runs job (`jobs/14-reference-runs/`) commits
+  selected run output under `results/<date>-ratis-<version>/` so that a
+  visitor can see what the harness found without running it. That job's
+  brief governs what may be committed there; the global `store/` ignore
+  stays intact, and no other job may commit artifacts.
 
 ## Parallelism
 
