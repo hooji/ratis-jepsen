@@ -65,7 +65,44 @@ coordinator turns these into jobs when their milestone arrives.*
    This answers the evaluation's open RATIS-1825 question with a
    mechanism and a candidate fix — prime material for the upstream
    engagement.
-10. **Env hardening (Review 02 round-1 suggestions, 2026-08-04, all
+10. **Upstream question (not yet a candidate): no parent-directory
+    sync after the raft-meta rename.** Job 11 / Review 11
+    (2026-08-06). Established: `term`/`votedFor` are written and
+    synced before the node acts on a vote (source-proven at 3.2.2,
+    probe-consistent) — there is **no double-vote defect at 3.2.2**.
+    The open question is narrower: `FileUtils.move` and its callers
+    perform no directory sync after the rename, and POSIX does not
+    make a rename durable without one (etcd/ZooKeeper/LevelDB sync the
+    parent for exactly this). Worst case is recovering the *previous*
+    raft-meta with an older term/vote — the re-vote hazard. Review 11
+    narrowed it usefully: an empty/unparseable meta file fails safe
+    (startup refusal via `getTerm → orElseThrow`), so only the
+    old-but-parseable-content case matters. **This harness cannot
+    demonstrate it** (renames pass through lazyfs); a
+    dm-flakey/CrashMonkey-style follow-up could. Frame any external
+    mention as a question with a mechanism, never as a found defect.
+11. **Probe-rule hardening before external quotation** (Review 11
+    finding 1): `harness/scripts/metadata-probe.sh` decision rules
+    skip samples whose backing term is unparseable, so a planted
+    sync-lying SUT still printed PASS. The dangerous
+    parseable-old-term shape *is* detected and the absence shape fails
+    safe, so the conclusion stands — but harden both rules (count
+    mount-parseable + backing-unparseable as divergence; treat an
+    unparseable recovered term or failed victim restart as a finding)
+    before quoting the experiment externally. Until then the correct
+    phrasing is "source-proven; probe-consistent".
+12. **lazyfs defects (upstream candidates for that project):** at the
+    pinned commit, fifo torn-write ops carrying `occurrence=` are
+    silently ignored (two defects characterized in Job 11's report,
+    verified live). Worth reporting to dsrhaslab/lazyfs as a courtesy
+    when we engage upstream anywhere.
+13. **Checker-cost variance / elle migration (Review 11 finding 4):**
+    the same whole-cluster shape analyzed in 8.2 s on one host and
+    17 s on another — the margin to the checker's practical limit
+    varies ~2× by machine. The elle migration deferred at Job 05 would
+    retire this tuning class entirely; revisit when a workload needs
+    it.
+14. **Env hardening (Review 02 round-1 suggestions, 2026-08-04, all
    non-blocking):** multi-cert `EXTRA_CA_B64` split; image/bundle size
    pre-flight check; `trap`-based failure summary in `validate.sh`;
    README note on the `maven-repo` volume lifecycle. Batch into an env

@@ -288,7 +288,13 @@ constrain everything downstream and should be settled first.
 
 ## 7. Immediate next steps
 
-*(updated 2026-08-06 (later): **M3 complete** — job 09 merged: exactly-once held under leader-kill churn at the default window; Q14 boundary demonstrated red only past it (quorum-pause nemesis; hazard is timeout-shaped, pre-step-down slice). **M4 gate cleared** (job 10 spike merged: lazyfs is CI-viable on
+*(updated 2026-08-06 (later): **M3 complete** — job 09 merged: exactly-once held under leader-kill churn at the default window; Q14 boundary demonstrated red only past it (quorum-pause nemesis; hazard is timeout-shaped, pre-step-down slice). **M4 complete** — job 11 merged: storage-durability faults
+(minority/whole-cluster un-synced discard, torn write) all met their
+stated expectations; term/votedFor proven durable-before-act at 3.2.2
+(source-proven, probe-consistent; Review 11 planted a defect to test
+the probe's power), with the parent-directory-rename question banked
+as BACKLOG 10. **M5 underway**: job 12 version matrix (3.2.2 vs
+3.3.0) + mixed-version topology. Earlier: **M4 gate cleared** (job 10 spike merged: lazyfs is CI-viable on
 hosted runners; single-node clear-cache cannot strand acknowledged
 writes, so M4 aims at torn writes and cluster-wide shapes).
 **M4 underway**: job 11 durability faults. Earlier: **M2 complete** — job 07 (snapshot churn,
