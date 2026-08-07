@@ -83,3 +83,24 @@
   sut/ratis-kv/src/main/java/ratis/jepsen/kv/Main.java — the client must
   join exactly this group. Keep in sync with the SUT source."
   (java.util.UUID/fromString "724d1912-848e-4e0f-a7e0-abbc16e54704"))
+
+;; --- M4 durability additions (Job 11) --------------------------------------
+;; Not part of the DESIGN 2.6 table; pinned here because env/ (Dockerfile)
+;; and the harness (db.clj mount lifecycle) must agree on them.
+
+(def lazyfs-bin
+  "The lazyfs binary baked into the env image (env/Dockerfile lazyfs-build
+  stage, pinned commit). Absent on non-amd64 images (PLAN Q8) — the
+  harness proves the mount per node and fails a durability run loudly."
+  "/opt/lazyfs/lazyfs")
+
+(def backing-dir
+  "The real (backing) directory a durability run's lazyfs mount projects
+  onto storage-dir: what lazyfs persists here is what would survive a
+  power loss; what only sits in its page cache is droppable on command."
+  "/var/lib/ratis-kv.root")
+
+(def lazyfs-log-file
+  "Where each node's lazyfs stdout (fault acknowledgements included) is
+  captured on durability runs — collected per run like the SUT log."
+  "/var/log/lazyfs.log")
