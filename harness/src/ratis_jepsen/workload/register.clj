@@ -33,7 +33,8 @@
             [jepsen.generator :as gen]
             [jepsen.independent :as independent]
             [knossos.model :as model]
-            [ratis-jepsen.checker :as rj-checker]))
+            [ratis-jepsen.checker :as rj-checker]
+            [ratis-jepsen.nemesis :as nemesis]))
 
 (def value-range
   "Written/CAS'd values are small ints — keeps CAS preconditions hitting
@@ -99,6 +100,13 @@
                                                 :algorithm :linear})
                                              :timeline (timeline/html)}))
                            :liveness   (rj-checker/liveness)
+                           ;; M4: a durability run must prove it really
+                           ;; ran on lazyfs (Job 11's evidence law).
+                           :mount-evidence
+                           (rj-checker/mount-evidence
+                             {:require-evidence?
+                              (contains? nemesis/durability-kinds
+                                         (:nemesis opts))})
                            ;; Counts always reported; REQUIRED (zero ⇒
                            ;; invalid) only for dedicated snapshot-churn
                            ;; runs, whose write stream is sized to cross

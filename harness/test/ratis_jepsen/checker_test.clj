@@ -617,3 +617,45 @@
              (cop 1 :invoke :add 3) (cop 1 :ok :add 3 {:observed 5})
              (cop 0 :ok :add 2 {:observed 2})]]
       (is (true? (:valid? (checker/check-counter-key h)))))))
+
+;; ---------------------------------------------------------------------------
+;; Mount evidence (Job 11, M4) — the durability law
+;; ---------------------------------------------------------------------------
+
+(def observed-mount-line
+  "Verbatim /proc/mounts line from a node in the env image (Job 11)."
+  (str "lazyfs /var/lib/ratis-kv fuse.lazyfs "
+       "rw,nosuid,nodev,relatime,user_id=0,group_id=0,allow_other 0 0"))
+
+(deftest mount-evidence-counting
+  (testing "a node whose log carries the /proc/mounts line counts mounted"
+    (let [ev (checker/count-mount-evidence
+               {"n1" (str "[lazyfs.fifo]: running LazyFS...\n"
+                          observed-mount-line "\n")
+                "n2" observed-mount-line
+                "n3" "plain boot chatter, no mount\n"
+                "n4" nil})]
+      (is (= #{"n1" "n2"} (:mounted ev)))
+      (is (= #{"n3" "n4"} (:unmounted ev))))))
+
+(deftest mount-evidence-verdict-decision
+  (let [all-mounted {:mounted #{"n1" "n2"} :unmounted #{} :drops {"n1" 2 "n2" 3}}
+        some-missing {:mounted #{"n1"} :unmounted #{"n2"} :drops {"n1" 1 "n2" 0}}]
+    (testing "required and every node mounted: valid, drops totalled"
+      (let [v (checker/mount-evidence-verdict true all-mounted)]
+        (is (true? (:valid? v)))
+        (is (= 5 (:total-drops v)))))
+    (testing "required and a node unproven: the distinct durability failure
+              — a run that was not on lazyfs proves nothing"
+      (let [v (checker/mount-evidence-verdict true some-missing)]
+        (is (false? (:valid? v)))
+        (is (= :no-lazyfs-mount-evidence (:error v)))))
+    (testing "required but no logs at all: same distinct failure"
+      (let [v (checker/mount-evidence-verdict
+                true {:mounted #{} :unmounted #{} :drops {}})]
+        (is (false? (:valid? v)))
+        (is (= :no-lazyfs-mount-evidence (:error v)))))
+    (testing "not required (every pre-M4 scenario): valid with a note"
+      (let [v (checker/mount-evidence-verdict false {:mounted #{} :unmounted #{"n1"} :drops {}})]
+        (is (true? (:valid? v)))
+        (is (some? (:note v)))))))

@@ -59,6 +59,52 @@
   before the run fails (a wedged start must be loud, fast)."
   30000)
 
+;; ---------------------------------------------------------------------------
+;; lazyfs (M4, Job 11). All harness-internal — not part of the DESIGN 2.6
+;; contract, which pins only the storage dir the SUT is told to use. In a
+;; durability run that same path becomes a lazyfs MOUNTPOINT whose backing
+;; store is lazyfs-backing-dir, so the SUT's --storage argument and every
+;; other path in the harness stay exactly as they are.
+;; ---------------------------------------------------------------------------
+
+(def lazyfs-bin
+  "The lazyfs binary baked into the env image (env/Dockerfile, pinned)."
+  "/opt/lazyfs/bin/lazyfs")
+
+(def lazyfs-backing-dir
+  "The real-filesystem directory a durability run's mount is backed by;
+  everything lazyfs actually persists lands here."
+  "/var/lib/ratis-kv.lazyfs-root")
+
+(def lazyfs-config-file "/run/lazyfs.toml")
+(def lazyfs-pid-file "/run/lazyfs.pid")
+
+(def lazyfs-fifo
+  "lazyfs's control pipe: the durability nemeses echo commands
+  (lazyfs::clear-cache) into it."
+  "/run/lazyfs.fifo")
+
+(def lazyfs-log-file
+  "lazyfs's stdout, collected per run. Doubles as THE MOUNT EVIDENCE
+  source (the mount line is appended here at mount time) and as the
+  fault record (lazyfs acknowledges each cache command here)."
+  "/var/log/lazyfs.log")
+
+(def lazyfs-cache-size
+  "Per-node cache size. The default config ships 1 GiB, which the spike
+  measured at ~8 s of pre-allocation per mount — ×5 nodes of startup
+  budget and 5 GiB of RAM. Our per-node storage is a 4 MiB preallocated
+  log segment plus small snapshot/meta files, so 64 MiB is ample for
+  everything a run can leave un-synced while making the mount ~instant
+  (measured cost in the Job 11 report)."
+  "64mb")
+
+(def lazyfs-mount-timeout-ms
+  "How long a node's mount gets to appear in /proc/mounts before the run
+  fails loudly — a durability run that silently ran on the plain
+  filesystem is a broken test."
+  30000)
+
 (def startup-poll-ms
   "Poll interval while awaiting the startup line."
   500)
@@ -237,6 +283,179 @@
   []
   (c/exec :rm :-rf env/storage-dir env/log-file))
 
+;; ---------------------------------------------------------------------------
+;; lazyfs mount lifecycle (M4). The mount must exist before the SUT starts
+;; and outlive every kill/restart cycle (lazyfs is its own process), so it
+;; is created in setup! and torn down in teardown! — never by the nemeses,
+;; which only send it fault commands over the fifo.
+;; ---------------------------------------------------------------------------
+
+(defn lazyfs-config
+  "The lazyfs toml for one node. `injection` is an optional extra block
+  (the torn-write nemesis configures its fault statically — lazyfs takes
+  torn faults from the config, not the fifo). Pure, so the shape is
+  unit-testable."
+  ([] (lazyfs-config nil))
+  ([injection]
+   (str "[faults]\n"
+        "fifo_path=\"" lazyfs-fifo "\"\n"
+        "[cache]\n"
+        "apply_eviction=false\n"
+        "[cache.simple]\n"
+        "custom_size=\"" lazyfs-cache-size "\"\n"
+        "blocks_per_page=1\n"
+        "[filesystem]\n"
+        "log_all_operations=false\n"
+        "logfile=\"\"\n"
+        (or injection ""))))
+
+(def torn-write-target
+  "The file the torn-write fault tears: the raft log segment the SUT is
+  actively appending to. The path is the one LAZYFS sees, which — with
+  `-o modules=subdir` — is the BACKING path, not the mountpoint path
+  (verified live: an injection keyed on the mountpoint path never fires,
+  one keyed on the backing path tears the write). The group uuid is the
+  SUT's compiled-in constant."
+  (str lazyfs-backing-dir "/" env/group-uuid "/current/log_inprogress_0"))
+
+(def torn-write-occurrence
+  "Which write to that file gets torn. Not the first — the fault should
+  land on a log that already holds committed entries, so the restart
+  exercises recovery over real data rather than an empty segment."
+  60)
+
+(defn torn-write-injection
+  "A lazyfs `torn-op` block: split the `occurrence`-th write to `file`
+  into `parts` pieces, persist only the parts listed in `persist`, and
+  (lazyfs's own behavior) crash the filesystem afterwards — a partial
+  write surviving a power cut. Persisting parts 1 and 3 of 3 leaves a
+  hole in the middle of the record, which is the shape a real torn
+  sector takes."
+  ([] (torn-write-injection torn-write-target torn-write-occurrence 3 [1 3]))
+  ([file occurrence parts persist]
+   (str "[[injection]]\n"
+        "type=\"torn-op\"\n"
+        "file=\"" file "\"\n"
+        "occurrence=" occurrence "\n"
+        "parts=" parts "\n"
+        "persist=[" (str/join "," persist) "]\n")))
+
+(defn mounted?
+  "Is the contract storage dir currently a lazyfs mount on this node?
+  Reads /proc/mounts — the ground truth, not our own belief."
+  []
+  (let [out (try (c/exec :bash :-c
+                         (str "grep -c ' " env/storage-dir " fuse.lazyfs ' "
+                              "/proc/mounts || true"))
+                 (catch Exception _ "0"))]
+    (pos? (try (Long/parseLong (str/trim out)) (catch Exception _ 0)))))
+
+(defn await-mount!
+  "Blocks until the lazyfs mount appears, throwing after
+  lazyfs-mount-timeout-ms. A durability run that silently ran on the
+  plain filesystem is a broken test, so a mount that never appears must
+  fail the run loudly and immediately."
+  [node]
+  (let [deadline (+ (System/nanoTime) (* lazyfs-mount-timeout-ms 1000000))]
+    (loop []
+      (cond
+        (mounted?) (do (log/info node "lazyfs mounted at" env/storage-dir) true)
+        (< (System/nanoTime) deadline)
+        (do (Thread/sleep ^long startup-poll-ms) (recur))
+        :else
+        (throw (ex-info (str "lazyfs did not mount " env/storage-dir " on "
+                             node " within " lazyfs-mount-timeout-ms " ms — "
+                             "refusing to run a durability test on the plain "
+                             "filesystem")
+                        {:node node :mountpoint env/storage-dir}))))))
+
+(defn mount-lazyfs!
+  "Mounts lazyfs over the contract storage dir on the current node:
+  fresh backing dir + mountpoint, per-node config, then the daemon under
+  start-stop-daemon (foreground mode so the pidfile is the real process
+  and stdout lands in the collected log). Appends the /proc/mounts line
+  to that log as the run's MOUNT EVIDENCE."
+  [node injection]
+  (c/exec :rm :-rf lazyfs-backing-dir)
+  (c/exec :mkdir :-p lazyfs-backing-dir env/storage-dir)
+  (c/exec :rm :-f lazyfs-fifo)
+  (cu/write-file! (lazyfs-config injection) lazyfs-config-file)
+  (cu/start-daemon!
+    {:logfile lazyfs-log-file
+     :pidfile lazyfs-pid-file
+     :chdir   "/"
+     :match-executable? false}
+    lazyfs-bin
+    env/storage-dir
+    "--config-path" lazyfs-config-file
+    "-o" "allow_other"
+    "-o" "modules=subdir"
+    "-o" (str "subdir=" lazyfs-backing-dir)
+    "-s"
+    "-f")
+  (await-mount! node)
+  ;; The evidence line, from the kernel's own view, into the log jepsen
+  ;; snarfs before teardown (checkers run after teardown — Job 07's
+  ;; lesson — so evidence must live in a collected file).
+  (c/exec :bash :-c (str "grep ' " env/storage-dir " fuse.lazyfs ' /proc/mounts"
+                         " >> " lazyfs-log-file))
+  :mounted)
+
+(defn remount-lazyfs!
+  "Re-mounts lazyfs over the storage dir PRESERVING the backing store —
+  the torn-write heal. lazyfs crashes itself when a torn fault fires, so
+  the mount must be rebuilt before the SUT can restart; wiping the
+  backing store instead would erase committed data that exists nowhere
+  else, which is an out-of-model fault (BACKLOG item 4), not a power
+  cut. The re-armed config carries no injection: one torn write per
+  cycle is the fault, an endless loop of them is not."
+  [node]
+  (try (c/exec :fusermount3 :-u env/storage-dir)
+       (catch Exception _ nil))
+  (try (cu/stop-daemon! lazyfs-pid-file)
+       (catch Exception _ nil))
+  (c/exec :mkdir :-p lazyfs-backing-dir env/storage-dir)
+  (c/exec :rm :-f lazyfs-fifo)
+  (cu/write-file! (lazyfs-config) lazyfs-config-file)
+  (cu/start-daemon!
+    {:logfile lazyfs-log-file
+     :pidfile lazyfs-pid-file
+     :chdir   "/"
+     :match-executable? false}
+    lazyfs-bin
+    env/storage-dir
+    "--config-path" lazyfs-config-file
+    "-o" "allow_other"
+    "-o" "modules=subdir"
+    "-o" (str "subdir=" lazyfs-backing-dir)
+    "-s"
+    "-f")
+  (await-mount! node)
+  :remounted)
+
+(defn unmount-lazyfs!
+  "Unmounts lazyfs and stops its daemon. Tolerant: teardown must finish
+  even if the mount is already gone (a torn-write fault crashes lazyfs
+  by design)."
+  []
+  (try (c/exec :fusermount3 :-u env/storage-dir)
+       (catch Exception e
+         (log/warn "fusermount3 -u failed (already unmounted?):"
+                   (.getMessage e))))
+  (try (cu/stop-daemon! lazyfs-pid-file)
+       (catch Exception e
+         (log/warn "stopping lazyfs daemon failed:" (.getMessage e))))
+  (c/exec :rm :-rf lazyfs-backing-dir)
+  :unmounted)
+
+(defn drop-unsynced!
+  "Sends lazyfs's clear-cache command: everything written through the
+  mount but never fsynced is discarded — the power-loss fault. The
+  daemon acknowledges into its log, which is the run's fault evidence."
+  []
+  (c/exec :bash :-c (str "echo 'lazyfs::clear-cache' > " lazyfs-fifo))
+  :dropped)
+
 (defn wipe-storage!
   "Removes the raft storage dir ONLY, preserving the log (Job 08: the
   membership nemesis returns a removed/replaced node to the clean pool
@@ -361,20 +580,31 @@
 ;; Jepsen DB
 ;; ---------------------------------------------------------------------------
 
-(defrecord RatisKvDB [seed-bug retry-cache-expiry-ms]
+(defrecord RatisKvDB [seed-bug retry-cache-expiry-ms durability]
   jdb/DB
   (setup! [this test node]
     (install! (find-tarball!))
+    ;; The mount goes up BEFORE the SUT so the server's very first write
+    ;; already lands on lazyfs; a failed mount throws here and fails the
+    ;; run before a single op is issued.
+    (when durability
+      (mount-lazyfs! node (:injection durability)))
     (jdb/start! this test node)
     (await-startup! node))
 
   (teardown! [this test node]
     (jdb/kill! this test node)
+    ;; Unmount BEFORE the wipe: rm -rf through a live FUSE mountpoint
+    ;; deletes the data but cannot remove the mountpoint, leaving a
+    ;; stale mount behind for the next run.
+    (when durability
+      (unmount-lazyfs!))
     (wipe!))
 
   jdb/LogFiles
   (log-files [_this _test _node]
-    [env/log-file])
+    (cond-> [env/log-file]
+      durability (conj lazyfs-log-file)))
 
   ;; Kill/restart primitives from day one (DESIGN 2.2) — M1's crash
   ;; nemesis calls these. Restart goes through the same start!* as first
@@ -399,13 +629,14 @@
     (resume!*)))
 
 (defn db
-  "The ratis-kv DB; pass a seed-bug mode name (e.g. \"stale-reads\") to
-  start every node with that deliberately seeded SUT bug, and/or a
-  retry-cache expiry override in ms (Job 09/Q14 — nil leaves the Ratis
-  default)."
-  ([]
-   (db nil))
-  ([seed-bug]
-   (db seed-bug nil))
-  ([seed-bug retry-cache-expiry-ms]
-   (RatisKvDB. seed-bug retry-cache-expiry-ms)))
+  "The ratis-kv DB. Options:
+    :seed-bug              deliberately seeded SUT bug (e.g. \"stale-reads\")
+    :retry-cache-expiry-ms Job 09/Q14 lever; nil leaves the Ratis default
+    :durability            nil (default — plain filesystem, every existing
+                           scenario byte-for-byte unchanged) or a map that
+                           turns the storage dir into a lazyfs mount,
+                           optionally carrying {:injection <toml block>}
+                           for the torn-write fault"
+  ([] (db {}))
+  ([{:keys [seed-bug retry-cache-expiry-ms durability]}]
+   (RatisKvDB. seed-bug retry-cache-expiry-ms durability)))

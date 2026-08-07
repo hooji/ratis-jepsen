@@ -36,6 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl \
       ca-certificates \
       rlwrap \
+      fuse3 \
+      libfuse3-3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Optional extra CA certificate(s) (base64-encoded PEM bundle), for hosts
@@ -69,6 +71,50 @@ RUN curl -fsSL \
     && bash /tmp/clojure-install.sh \
     && rm /tmp/clojure-install.sh \
     && clojure --version
+
+# lazyfs (M4, Job 11): the FUSE filesystem whose page cache only persists
+# what the application fsyncs, so a fault can drop the rest — power-loss
+# simulation for the durability nemeses. Pinned to the commit Job 10's
+# spike proved out; the spike's two accommodations are baked in:
+#
+#  1. spdlog is pre-cloned and fed to CMake via FETCHCONTENT_SOURCE_DIR_SPDLOG
+#     because libpcache fetches it as a GitHub *archive tarball*, which
+#     TLS-inspecting egress proxies commonly 403 (git clone works). Harmless
+#     where the proxy does not exist.
+#  2. lazyfs's own CMakeLists hardcodes libpcache's _deps path for the spdlog
+#     headers, so the clone is symlinked into that path before its build.
+#
+# Build-only packages are purged in the same layer; the runtime needs only
+# fuse3/libfuse3-3 (installed above) plus libpcache.so. INERT BY DEFAULT:
+# nothing here runs unless the harness mounts a lazyfs (--durability), so
+# every existing scenario behaves exactly as before.
+ARG LAZYFS_COMMIT=045a0b3a1126725e693934e29d3ba15e08cc39ec
+ARG SPDLOG_TAG=v1.10.0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ make cmake git libfuse3-dev \
+    && git clone https://github.com/dsrhaslab/lazyfs.git /tmp/lazyfs \
+    && git -C /tmp/lazyfs checkout --quiet "${LAZYFS_COMMIT}" \
+    && git clone --depth 1 --branch "${SPDLOG_TAG}" \
+         https://github.com/gabime/spdlog.git /tmp/spdlog \
+    && mkdir -p /tmp/lazyfs/libs/libpcache/build \
+    && cd /tmp/lazyfs/libs/libpcache/build \
+    && cmake -DFETCHCONTENT_SOURCE_DIR_SPDLOG=/tmp/spdlog .. \
+    && cmake --build . -j"$(nproc)" \
+    && ln -sfn /tmp/spdlog /tmp/lazyfs/libs/libpcache/build/_deps/spdlog-src \
+    && cd /tmp/lazyfs/lazyfs \
+    && ./build.sh \
+    && mkdir -p /opt/lazyfs/bin \
+    && cp /tmp/lazyfs/lazyfs/build/lazyfs /opt/lazyfs/bin/lazyfs \
+    && cp /tmp/lazyfs/libs/libpcache/build/libpcache.so /usr/local/lib/ \
+    && ldconfig \
+    && printf '%s\n' "${LAZYFS_COMMIT}" > /opt/lazyfs/COMMIT \
+    && test -x /opt/lazyfs/bin/lazyfs \
+    && apt-get purge -y --auto-remove g++ make cmake git libfuse3-dev \
+    && rm -rf /tmp/lazyfs /tmp/spdlog /var/lib/apt/lists/*
+
+# FUSE needs allow_other for a mount made by one process to be usable by
+# another (the SUT writes through a mount the harness created).
+RUN printf 'user_allow_other\n' >> /etc/fuse.conf
 
 # sshd: root may log in with a key only (the compose network is private and
 # throwaway; keys are generated per-checkout by run.sh, never committed).

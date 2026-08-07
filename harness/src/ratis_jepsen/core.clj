@@ -250,6 +250,13 @@
   (alter-var-root #'store/base-dir (constantly (:store-dir opts)))
   (let [opts        (workload-defaults opts)
         membership? (contains? nemesis/membership-kinds (:nemesis opts))
+        ;; M4: durability kinds turn every node's storage dir into a
+        ;; lazyfs mount. Nothing else in the harness changes shape, and
+        ;; a non-durability run never touches lazyfs at all.
+        durability  (when (contains? nemesis/durability-kinds (:nemesis opts))
+                      (cond-> {}
+                        (= "torn-write" (:nemesis opts))
+                        (assoc :injection (db/torn-write-injection))))
         nodes       (if membership?
                       (vec env/all-nodes)
                       (:nodes opts))
@@ -262,7 +269,9 @@
                             (when (:seed-bug opts)
                               (str "-seedbug-" (:seed-bug opts))))
             :nodes     nodes
-            :db        (db/db (:seed-bug opts) (:retry-cache-expiry-ms opts))
+            :db        (db/db {:seed-bug (:seed-bug opts)
+                               :retry-cache-expiry-ms (:retry-cache-expiry-ms opts)
+                               :durability durability})
             :client    (client/client)
             :nemesis   (:nemesis nem)
             :checker   (:checker workload)

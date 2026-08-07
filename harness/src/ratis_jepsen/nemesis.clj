@@ -112,7 +112,15 @@
   "CLI-selectable fault schedules."
   #{"none" "partition" "crash" "pause" "mixed"
     "snapshot-churn" "transfer" "membership" "membership-snapshot-churn"
-    "listener-probe" "quorum-pause" "mixed-all"})
+    "listener-probe" "quorum-pause"
+    "unsync-drop" "unsync-drop-all" "torn-write"
+    "mixed-all"})
+
+(def durability-kinds
+  "Fault schedules that require every node's storage dir to be a lazyfs
+  mount (M4, Job 11). core.clj keys --durability off this set, and the
+  register/counter workloads require mount evidence for them."
+  #{"unsync-drop" "unsync-drop-all" "torn-write"})
 
 (def fault->heal
   "Each fault-opening op :f and the op :f that heals it. The single
@@ -123,7 +131,13 @@
    :pause               :resume
    :churn-kill          :churn-restart
    :member-replace-dead :member-replace-done
-   :quorum-pause        :quorum-resume})
+   :quorum-pause        :quorum-resume
+   ;; M4 durability faults: each takes nodes down (drop + kill) and heals
+   ;; by restarting them, so the liveness checker gates the whole window —
+   ;; including unsync-drop-all's legal cluster-wide availability gap.
+   :unsync-drop         :unsync-restart
+   :unsync-drop-all     :unsync-restart-all
+   :torn-write          :torn-restart})
 
 (def fault-fs (set (keys fault->heal)))
 (def heal-fs  (set (vals fault->heal)))
@@ -177,6 +191,13 @@
   stays dead-and-removed for 8 s before the replacement half runs."
   {:calm-s 15 :replace-dead-s 8})
 
+(def default-durability-cycle
+  "M4 durability faults: calm 25 s (so a good stretch of acked writes
+  accumulates before each fault), nodes stay down 8 s while their
+  un-synced pages are gone, then restart. The torn-write cycle reuses
+  the same shape."
+  {:calm-s 25 :fault-s 8})
+
 (def quorum-pause-cycle
   "The Job 09/Q14 quorum stall: calm 20 s, then every node EXCEPT the
   leader is SIGSTOPped for 8 s. The live leader keeps accepting and
@@ -212,6 +233,10 @@
                 (:snapshot-to-restart-s default-churn-cycle))}
    :transfer  {:calm-s (:transfer-calm-s opts
                         (:calm-s default-transfer-cycle))}
+   :durability {:calm-s  (:durability-calm-s opts
+                          (:calm-s default-durability-cycle))
+                :fault-s (:durability-fault-s opts
+                          (:fault-s default-durability-cycle))}
    :membership {:calm-s (:membership-calm-s opts
                          (:calm-s default-membership-cycle))
                 :replace-dead-s
@@ -900,6 +925,85 @@
 
       (teardown! [_this _test]))))
 
+(defn durability-nemesis
+  "The M4 durability nemeses (Job 11). Each fault does the same two
+  things per target node, in this order: discard everything lazyfs holds
+  un-synced (`lazyfs::clear-cache`), then `kill -9` the SUT — together a
+  power cut, since a real power loss takes the process AND the volatile
+  page cache. The heal restarts every node.
+
+    :unsync-drop      a random minority (survivors keep a majority, so
+                      the model is ordinary crash-recovery plus lost
+                      un-synced data — expected green)
+    :unsync-drop-all  every node at once (the quorum-wide shape the
+                      spike identified as the only one that can reach
+                      Raft's durability assumption; a temporary
+                      availability gap is legal, safety is not)
+    :torn-write       the node whose mount was armed with a torn-op
+                      injection is killed and restarted on its torn
+                      storage; lazyfs crashes itself when the fault
+                      fires, so the heal REMOUNTS it — preserving the
+                      backing store, because wiping it would be
+                      out-of-model committed-state loss (BACKLOG 4)
+
+  Every action's per-node result is recorded in the op value; a node
+  whose drop fails is recorded, never silently skipped."
+  []
+  (let [torn-node (atom nil)]
+    (reify jn/Nemesis
+      (setup! [this _test] this)
+
+      (invoke! [_this test op]
+        (case (:f op)
+          (:unsync-drop :unsync-drop-all)
+          (let [targets (if (= :unsync-drop-all (:f op))
+                          (conf-nodes test)
+                          (select-targets (conf-nodes test) nil
+                                          (target-count (count (conf-nodes test)))))]
+            (assoc op :value
+                   {:targets targets
+                    :result
+                    (c/on-nodes test targets
+                                (fn [t node]
+                                  (let [dropped (try (db/drop-unsynced!)
+                                                     (catch Exception e
+                                                       (error-token e)))]
+                                    {:drop dropped
+                                     :kill (jdb/kill! (:db t) t node)})))}))
+
+          (:unsync-restart :unsync-restart-all)
+          (assoc op :value
+                 (c/on-nodes test (fn [t node] (jdb/start! (:db t) t node))))
+
+          ;; The torn-write fault is armed statically in the node's lazyfs
+          ;; config at mount time (lazyfs takes torn faults from the
+          ;; config, not the fifo) and fires on the SUT's own I/O. The
+          ;; nemesis kills the node so it must restart onto whatever the
+          ;; torn write left on disk.
+          :torn-write
+          (let [target (first (conf-nodes test))]
+            (reset! torn-node target)
+            (assoc op :value
+                   {:target target
+                    :result (c/on-nodes test [target]
+                                        (fn [t node] (jdb/kill! (:db t) t node)))}))
+
+          :torn-restart
+          (let [target (or @torn-node (first (conf-nodes test)))]
+            (assoc op :value
+                   {:target target
+                    :result (c/on-nodes test [target]
+                                        (fn [t node]
+                                          ;; lazyfs crashes itself when a
+                                          ;; torn fault fires; remount it
+                                          ;; over the SAME backing store,
+                                          ;; then start the SUT on the
+                                          ;; torn storage.
+                                          {:remount (db/remount-lazyfs! node)
+                                           :start (jdb/start! (:db t) t node)}))}))))
+
+      (teardown! [_this _test]))))
+
 (defn full-nemesis
   "One nemesis for all fault kinds, routing by :f. Present in every
   fault-bearing mode: the generator decides which faults actually fire,
@@ -916,7 +1020,10 @@
                #{:member-add :member-remove :member-replace-dead
                  :member-replace-done :listener-add :listener-census
                  :listener-promote :listener-demote :listener-remove}
-               (membership-nemesis)}))
+               (membership-nemesis)
+               #{:unsync-drop :unsync-restart :unsync-drop-all
+                 :unsync-restart-all :torn-write :torn-restart}
+               (durability-nemesis)}))
 
 ;; ---------------------------------------------------------------------------
 ;; Generators
@@ -936,6 +1043,25 @@
 (defn partition-segment [cycles] (segment :start (:partition cycles)))
 (defn crash-segment     [cycles] (segment :crash (:crash cycles)))
 (defn pause-segment     [cycles] (segment :pause (:pause cycles)))
+
+(defn unsync-drop-segment
+  "One minority durability cycle: calm, drop+kill a minority, wait,
+  restart everything."
+  [cycles]
+  (segment :unsync-drop (:durability cycles)))
+
+(defn unsync-drop-all-segment
+  "One cluster-wide durability cycle: calm, drop+kill EVERY node, wait,
+  restart everything. The window is a legal availability gap."
+  [cycles]
+  (segment :unsync-drop-all (:durability cycles)))
+
+(defn torn-write-segment
+  "One torn-write cycle: calm (during which the armed torn-op fault
+  fires on the SUT's own log write), kill the armed node, wait, remount
+  and restart it onto its torn storage."
+  [cycles]
+  (segment :torn-write (:durability cycles)))
 
 (defn quorum-pause-segment
   "One quorum stall (pinned cycle; Q14 lever)."
@@ -1112,5 +1238,11 @@
                          :generator listener-probe-script}
        "quorum-pause"   {:nemesis   (full-nemesis)
                          :generator (cycle (quorum-pause-segment cs))}
+       "unsync-drop"    {:nemesis   (full-nemesis)
+                         :generator (cycle (unsync-drop-segment cs))}
+       "unsync-drop-all" {:nemesis   (full-nemesis)
+                          :generator (cycle (unsync-drop-all-segment cs))}
+       "torn-write"     {:nemesis   (full-nemesis)
+                         :generator (cycle (torn-write-segment cs))}
        "mixed-all"      {:nemesis   (full-nemesis)
                          :generator (mixed-all-generator cs)}))))

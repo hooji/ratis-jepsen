@@ -39,6 +39,7 @@
             [jepsen.generator :as gen]
             [jepsen.independent :as independent]
             [ratis-jepsen.checker :as rj-checker]
+            [ratis-jepsen.nemesis :as nemesis]
             [ratis-jepsen.workload.register :as register]))
 
 (def max-delta
@@ -101,6 +102,13 @@
                                             {:counter  (rj-checker/counter)
                                              :timeline (timeline/html)}))
                            :liveness   (rj-checker/liveness)
+                           ;; M4: a durability run must prove it really
+                           ;; ran on lazyfs (Job 11's evidence law).
+                           :mount-evidence
+                           (rj-checker/mount-evidence
+                             {:require-evidence?
+                              (contains? nemesis/durability-kinds
+                                         (:nemesis opts))})
                            :retry-evidence
                            (rj-checker/retry-evidence
                              {:require-evidence?

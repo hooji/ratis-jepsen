@@ -750,3 +750,85 @@
      (reify checker/Checker
        (check [_this _test history _copts]
          (retry-verdict require? (retry-totals history)))))))
+
+;; ---------------------------------------------------------------------------
+;; Mount evidence (Job 11, M4): the durability law. A durability run that
+;; silently executed on the plain filesystem tested nothing at all — its
+;; green is a lie, because the fault it injected could not have touched
+;; anything. db.clj already fails a run whose mount never appears; this
+;; checker is the after-the-fact proof from collected artifacts, so a
+;; reviewer reading store/ can see that every node really ran on lazyfs.
+;;
+;; The evidence is the kernel's own /proc/mounts line, appended to each
+;; node's lazyfs log at mount time (db/mount-lazyfs!):
+;;
+;;   lazyfs /var/lib/ratis-kv fuse.lazyfs rw,nosuid,nodev,relatime,...
+;;
+;; and the drop acknowledgements lazyfs writes there when the nemesis
+;; sends it a fault, which prove the fault reached the filesystem.
+;; ---------------------------------------------------------------------------
+
+(def mount-evidence-pattern
+  "The /proc/mounts line proving the storage dir is a lazyfs mount."
+  #"fuse\.lazyfs")
+
+(def drop-evidence-pattern
+  "lazyfs's acknowledgement of a cache-clearing fault command."
+  #"(?i)clear.cache|cache cleared|faults.worker")
+
+(defn count-mount-evidence
+  "Pure: {node log-content} in, {:mounted #{nodes}, :unmounted #{nodes},
+  :drops {node n}} out."
+  [node->content]
+  (reduce (fn [acc [node content]]
+            (let [lines (str/split-lines (or content ""))
+                  mount? (boolean (some #(re-find mount-evidence-pattern %) lines))
+                  drops  (count (filter #(re-find drop-evidence-pattern %) lines))]
+              (-> acc
+                  (update (if mount? :mounted :unmounted) conj node)
+                  (assoc-in [:drops node] drops))))
+          {:mounted #{} :unmounted #{} :drops {}}
+          node->content))
+
+(defn mount-evidence-verdict
+  "Pure: the mount-evidence decision. Required only for durability runs;
+  every node must show its mount."
+  [required? {:keys [mounted unmounted drops] :as ev}]
+  (cond
+    (not required?)
+    (assoc ev :valid? true
+           :note "mount evidence not required for this run")
+
+    (seq unmounted)
+    (assoc ev :valid? false
+           :error :no-lazyfs-mount-evidence
+           :note (str "nodes " (pr-str (sort unmounted)) " show no lazyfs "
+                      "mount in their collected logs — a durability run "
+                      "that was not actually on lazyfs proves nothing"))
+
+    (empty? mounted)
+    (assoc ev :valid? false
+           :error :no-lazyfs-mount-evidence
+           :note "no node produced a lazyfs log at all")
+
+    :else
+    (assoc ev :valid? true
+           :total-drops (reduce + 0 (vals drops)))))
+
+(defn mount-evidence
+  "The mount-evidence checker; REQUIRED when :require-evidence? (the
+  workloads set it for durability nemeses)."
+  ([] (mount-evidence {}))
+  ([opts]
+   (let [require? (boolean (:require-evidence? opts))]
+     (reify checker/Checker
+       (check [_this test _history _copts]
+         (mount-evidence-verdict
+           require?
+           (count-mount-evidence
+             (into {}
+                   (map (fn [node]
+                          [(name node)
+                           (let [f (store/path test (name node) "lazyfs.log")]
+                             (when (.exists ^java.io.File f) (slurp f)))]))
+                   (:nodes test)))))))))

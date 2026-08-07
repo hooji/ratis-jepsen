@@ -26,16 +26,31 @@
   (is (= #{"none" "partition" "crash" "pause" "mixed"
            "snapshot-churn" "transfer" "membership"
            "membership-snapshot-churn" "listener-probe" "quorum-pause"
+           "unsync-drop" "unsync-drop-all" "torn-write"
            "mixed-all"}
          nemesis/kinds)))
+
+(deftest durability-kinds-surface
+  (testing "the M4 kinds that need a lazyfs mount — and only those"
+    (is (= #{"unsync-drop" "unsync-drop-all" "torn-write"}
+           nemesis/durability-kinds))
+    (is (every? nemesis/kinds nemesis/durability-kinds))
+    (testing "no pre-M4 kind accidentally requires a mount (the
+              regression guarantee: existing scenarios are untouched)"
+      (is (not-any? nemesis/durability-kinds
+                    ["none" "partition" "crash" "pause" "mixed"
+                     "snapshot-churn" "transfer" "membership"
+                     "membership-snapshot-churn" "listener-probe"
+                     "quorum-pause" "mixed-all"])))))
 
 (deftest fault-heal-vocabulary
   (testing "every fault has exactly one heal; no f plays both roles"
     (is (= #{:start :crash :pause :churn-kill :member-replace-dead
-             :quorum-pause}
+             :quorum-pause :unsync-drop :unsync-drop-all :torn-write}
            nemesis/fault-fs))
     (is (= #{:stop :restart :resume :churn-restart :member-replace-done
-             :quorum-resume}
+             :quorum-resume :unsync-restart :unsync-restart-all
+             :torn-restart}
            nemesis/heal-fs))
     (is (empty? (set/intersection nemesis/fault-fs nemesis/heal-fs)))
     (is (= (count nemesis/fault-fs)
@@ -349,6 +364,39 @@
     ;; conf-nodes minus census — assert the shape via the helper's
     ;; degraded path contract instead: all-but-one when no census.
     (is (= 4 (count (remove #{"n3"} ["n1" "n2" "n3" "n4" "n5"]))))))
+
+(deftest durability-segments-and-package
+  (testing "each durability fault is a proper pair: calm, fault, window,
+            heal — so the liveness checker gates the whole outage,
+            including unsync-drop-all's legal cluster-wide gap"
+    (is (= [{:type :sleep, :value 25}
+            {:type :info, :f :unsync-drop}
+            {:type :sleep, :value 8}
+            {:type :info, :f :unsync-restart}]
+           (nemesis/unsync-drop-segment default-cycles)))
+    (is (= [{:type :sleep, :value 25}
+            {:type :info, :f :unsync-drop-all}
+            {:type :sleep, :value 8}
+            {:type :info, :f :unsync-restart-all}]
+           (nemesis/unsync-drop-all-segment default-cycles)))
+    (is (= [{:type :sleep, :value 25}
+            {:type :info, :f :torn-write}
+            {:type :sleep, :value 8}
+            {:type :info, :f :torn-restart}]
+           (nemesis/torn-write-segment default-cycles))))
+  (testing "cadence is configurable"
+    (is (= [{:type :sleep, :value 40}
+            {:type :info, :f :unsync-drop}
+            {:type :sleep, :value 3}
+            {:type :info, :f :unsync-restart}]
+           (nemesis/unsync-drop-segment
+             (nemesis/cycles {:durability-calm-s 40 :durability-fault-s 3})))))
+  (testing "each kind cycles its own segment"
+    (doseq [[kind seg] [["unsync-drop" nemesis/unsync-drop-segment]
+                        ["unsync-drop-all" nemesis/unsync-drop-all-segment]
+                        ["torn-write" nemesis/torn-write-segment]]]
+      (is (= (seg default-cycles)
+             (take 4 (:generator (nemesis/package kind)))) kind))))
 
 (deftest package-m2-kinds
   (testing "snapshot-churn and transfer cycle their segments"
