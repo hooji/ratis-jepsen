@@ -10,7 +10,10 @@ built by a coordinated multi-agent process.
 - **Assigned a review**? Read `reviews/README.md` first, then your brief
   in `reviews/<NN>-<slug>/`.
 - **Coordinating / anything else**: `docs/PROCESS.md` (workflow),
-  `docs/PLAN.md` (project plan + decisions), `docs/DESIGN.md` (M0 design).
+  `docs/PLAN.md` (project plan + decisions), `docs/DESIGN.md` (the M0
+  design plus its dated amendments), `docs/RUNS.md` (what has actually
+  been run), `docs/BACKLOG.md` (accepted findings and their
+  classifications). `README.md` is the outside view.
 
 ## Hard rules for all agents
 

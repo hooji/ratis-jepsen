@@ -2,9 +2,10 @@
 
 One Docker image for every role, a compose topology of `control` plus db
 nodes `n1..n7` on a private bridge network (Jepsen convention: control
-SSHes to nodes as root), and a single entry script. Built by Job 02; the
-Clojure harness (Jobs 03/04) runs on `control` and drives the nodes over
-SSH.
+SSHes to nodes as root), and a single entry script. Built by Job 02 and
+extended by later milestones (env polish and CI at M1, lazyfs at M4,
+version selection at M5); the Clojure harness runs on `control` and
+drives the nodes over SSH.
 
 ## Usage
 
@@ -12,8 +13,12 @@ SSH.
 env/run.sh up        # build image (cached), start compose, wait for ssh on all 7 nodes
 env/run.sh down      # stop and remove containers, network, volumes; idempotent
 env/run.sh test      # run the harness on control; args pass through
-                     # (--nemesis, --time-limit, --seed-bug, ...) and the
+                     # (--workload, --nemesis, --time-limit, --seed-bug,
+                     # --ratis-version, --mixed-version, ...) and the
                      # harness exit code is the verdict (0 = checker valid)
+env/run.sh probe     # the Job 12 in-JVM library probe (BACKLOG 7/8) on
+                     # control; --ratis-version selects the Ratis jars.
+                     # Touches no db node
 env/validate.sh      # end-to-end proof: SUT build on control, 5-node boot,
                      # exactly one *current* leader (last role transition
                      # per node), ports, clean SIGTERM stop
@@ -69,8 +74,16 @@ disagree, DESIGN wins.
 | Log | stdout captured to `/var/log/ratis-kv.log` |
 | Startup line | after `RaftServer.start()`, stdout emits `ratis-kv server started: id=<id> address=<host:port> storage=<dir> group=<uuid> peers=<list>` — the boot-await signal for env validation and `db.clj` (confirmed present at Job 01's merge; changing it is a breaking change requiring a brief) |
 
+DESIGN §2.6 carries two further rows this table does not repeat: the
+storage directory becomes a lazyfs mount under `--durability`, and
+`/opt/ratis-kv` becomes a per-node symlink under `--mixed-version`.
+
 Compose service names equal hostnames `n1..n7` exactly (the harness's node
-list uses those literal names). `n6`/`n7` are up but run no SUT in M0.
+list uses those literal names). `n6`/`n7` are up for every run but only
+run the SUT on membership-bearing scenarios (`membership`,
+`membership-snapshot-churn`, `listener-probe`, `mixed-all`) — that is the
+Q5 pool they were pre-provisioned for. Every other scenario runs the five
+voters `n1..n5`.
 
 ## lazyfs (durability faults, Job 11 / M4)
 

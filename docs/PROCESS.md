@@ -73,6 +73,18 @@ reviews/<NN>-<slug>/<NN>_report.md # review report (reviewer, in the review PR)
      delta. **After two REVISE rounds, stop: owner + coordinator decide**
      (re-scope, reassign, or coordinator documents an accepted exception).
 
+### Standing jobs (added 2026-08-06, first used by Job 13)
+
+Some jobs are **standing**: re-run after milestones merge, more than
+once, against a moving repository. They keep one brief and one directory,
+and each run adds its own report (`NN_report.md`, then `NN_report_2.md`,
+…) — never overwriting a previous one. A documentation-only standing job
+is **merged by the coordinator without a separate review**, which makes
+its report the only record of what was examined; the bar for care is
+correspondingly higher, not lower. Everything else about the lifecycle
+(brief, ownership, branch, PR titled `Job NN: <title> (<n>)`) is
+unchanged.
+
 ## Tooling note
 
 Worker and reviewer sessions run in **Claude Code Cloud** environments:

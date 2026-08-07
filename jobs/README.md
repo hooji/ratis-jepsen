@@ -6,8 +6,18 @@ Read, in order, before writing any code:
 
 1. This file.
 2. `docs/PLAN.md` — project purpose, decisions, milestones.
-3. `docs/DESIGN.md` — the M0 design your job implements a slice of.
+3. `docs/DESIGN.md` — the M0 design, plus the dated amendments later
+   milestones added to it. Your job attaches at one of its seams; §2.6's
+   deployment contract binds you.
 4. Your brief: `jobs/<NN>-<slug>/<NN>_brief.md`.
+
+Also worth reading before you start, because they are where the project's
+current state actually lives: `docs/RUNS.md` (every reference run, with
+the framing each result is allowed to be described in) and
+`docs/BACKLOG.md` (accepted findings and their classifications — if your
+job touches one, its classification is binding). The merged reports in
+`jobs/` and `reviews/` are the factual record when a document and the
+code disagree.
 
 `docs/PROCESS.md` describes the overall workflow if you want the full
 picture; the rules that bind *you* are below.

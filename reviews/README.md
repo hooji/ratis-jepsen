@@ -5,7 +5,11 @@ You are a reviewer agent assessing exactly one job's pull request in
 Read, in order:
 
 1. This file.
-2. `docs/PLAN.md` and `docs/DESIGN.md` — what the project is building.
+2. `docs/PLAN.md` and `docs/DESIGN.md` — what the project is building
+   (DESIGN is the M0 design plus dated amendments; §2.6's deployment
+   contract is live). `docs/RUNS.md` and `docs/BACKLOG.md` tell you what
+   has actually been demonstrated and how firmly — useful when a report
+   characterizes a result.
 3. The **job brief** you are reviewing against:
    `jobs/<NN>-<slug>/<NN>_brief.md`.
 4. Your review brief: `reviews/<NN>-<slug>/<NN>_brief.md` (adds emphasis;

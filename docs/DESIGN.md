@@ -5,6 +5,16 @@ Scope: milestone M0 only, with seams left where M1–M3 attach. Every Ratis
 identifier named here was verified to exist at tag `ratis-3.2.2` during the
 2026-08 evaluation (spike traces, `RAFT_LIBRARY_EVALUATION.md` §3/§8).*
 
+*This is the M0 design and stays one: M1–M5 attached at the seams it
+left rather than replacing it. Where a later milestone changed something
+stated here, the change appears as a **dated amendment** beside the
+original text, never as a rewrite. §2.6's deployment contract is the one
+section that is a live contract rather than history — env and harness
+both build to it, and it wins over `env/README.md`'s copy. For the
+current option surface, `clojure -M:run test --help` is authoritative;
+for the current outcome table, `harness/src/ratis_jepsen/outcome.clj`'s
+docstring is.*
+
 ## 0. M0 scope and exit criteria
 
 Build the smallest end-to-end thing that can be *wrong*: a 5-voter Ratis KV
@@ -50,6 +60,13 @@ bin/ratis-kv --id n1 \
              [--seed-bug stale-reads]
 ```
 
+*Amended 2026-08-07 (Job 13, recording what M2/M3 added): the launcher
+also accepts `--join` (M2 membership pool — see §2.6's join-mode row)
+and `--retry-cache-expiry-ms <ms>` (the M3/Q14 test lever, which
+overrides `raft.server.retrycache.expirytime`; absent, the Ratis default
+60 s window is untouched). `bin/ratis-kv --help` prints the current
+contract.*
+
 - `--id` must appear in `--peers`. Group id is a fixed constant UUID
   (identical on every node — a Ratis requirement; evaluation spike A.1).
 - Single process, foreground, logs to stdout (the harness redirects to
@@ -72,12 +89,24 @@ chosen for containerized shared-CPU runs:
 | `raft.server.read.option` | `LINEARIZABLE` | the semantics under test; the `DEFAULT` mode legally serves stale reads and would be a standing false positive |
 | `raft.server.rpc.timeout.min` / `.max` | 1 s / 2 s | LAN defaults (150–300 ms) cause spurious elections on noisy shared runners |
 | `raft.server.snapshot.auto.trigger.enabled` | `true` | snapshots on from day one (they are a test target, not an extra) |
-| `raft.server.snapshot.auto.trigger.threshold` | 4096 | low enough that ordinary runs snapshot; M2 lowers it further to force install-snapshot |
+| `raft.server.snapshot.auto.trigger.threshold` | 4096 | low enough that ordinary runs snapshot; M2 was expected to lower it further to force install-snapshot |
 | `raft.server.log.purge.upto.snapshot.index` | `true` | reclaim regardless of laggards; makes install-snapshot reachable once a follower falls behind a purge (M2's lever) |
 | `raft.client.rpc.request.timeout` | 3 s (default) | must exceed worst-case commit latency; jepsen op timeout sits above it (§2.4) |
 
 Client-side (harness): retry policy per §2.3 — never the library default
 (`retryForeverNoSleep`).
+
+*Amended 2026-08-07 (Job 13): the profile above is what the SUT still
+sets, unchanged — including the 4096 threshold. **M2 did not lower it.**
+Job 07 found that kill + client-triggered snapshot + restart cannot
+reach install-snapshot at these settings at all (its first gate failed
+correctly with `:no-install-snapshot-evidence`); what reaches it is a
+sustained write stream that crosses the server's purge-gap milestones
+behind a held-back follower, so the `snapshot-churn` schedule carries
+workload defaults (`--rate 1.4 --ops-per-key 800`) instead of a
+different server config. The only server-config knob a run can change is
+`--retry-cache-expiry-ms`, and that is a test lever (§1.2), never part
+of the profile.*
 
 ### 1.4 Wire protocol (SUT command protocol)
 
@@ -214,6 +243,21 @@ ambiguous. Initial table (types verified at 3.2.2):
 | `ReadException` / `ReadIndexException` | — | `:fail` (read never happened) |
 | `TimeoutIOException`, generic `IOException`, `AlreadyClosedException`, interrupt | **`:info`** (may or may not have applied) | `:fail` |
 
+*Amended 2026-08-07 (Job 13): the table above is the M0 original plus
+the 2026-08-05 NotLeader/LeaderNotReady amendment. Later jobs added rows
+to the implementation, each with its own unit test: `ServerNotReadyException`
+(`:info` write / `:fail` read), `RaftRetryFailureException` with a null
+cause (`:info` — what a retry-exhausted NotLeader/LeaderNotReady
+surfaces as after the §2.3 amendment) and with a non-null cause
+(`:info`, cause preserved in `:error`), `LeaderSteppingDownException`
+(definite `:fail` — a pre-append admission reject; Job 07 added it after
+147 pessimistic `:info`s from one transfer run pushed knossos out of
+memory), and the harness-side `java.util.concurrent.TimeoutException`
+(`:info` write / `:fail` read). The ADD op of the M3 counter workload
+classifies as a write. **The live table is the docstring of
+`harness/src/ratis_jepsen/outcome.clj`**; this section is its M0
+ancestor.*
+
 The SPI v3 Transient/Permanent/Indeterminate taxonomy is the intellectual
 template (same classify-at-the-throw-site discipline); this table is the
 harness's version of it and gets plain unit tests with fabricated
@@ -234,6 +278,20 @@ exceptions before any cluster run trusts it.
   jepsen's rate plots plus the run wall-clock cap to notice a wedged
   cluster.
 
+*Amended 2026-08-07 (Job 13): **the elle migration did not happen.**
+knossos with the `cas-register` model is still the register checker, and
+the budget is still what bounds it — which is why per-kind workload
+defaults exist (`--rate`, `--ops-per-key`, `--key-count`; the
+sustained-stream kinds and `unsync-drop-all` each carry their own). The
+migration is banked as BACKLOG 13, with the evidence for why it would
+pay: analysis cost varies ~2× by host, and three preserved runs in
+`docs/RUNS.md` were pushed out of memory by `:info` mass. What *was*
+added on top of M0's checkers: the M1 liveness checker (as planned), the
+M3 counter checker, and the evidence checkers (install-snapshot,
+membership conf transitions, joiner installs, durability faults, retry
+counts, applied rolls) that fail a run whose fault never demonstrably
+happened.*
+
 ## 2.6 Deployment contract (pinned 2026-08-04; env and harness both build to this)
 
 | Item | Value |
@@ -244,6 +302,8 @@ exceptions before any cluster run trusts it.
 | Storage dir | `/var/lib/ratis-kv` |
 | Log | stdout captured to `/var/log/ratis-kv.log` |
 | Startup line | after `RaftServer.start()`, stdout emits `ratis-kv server started: id=<id> address=<host:port> storage=<dir> group=<uuid> peers=<list>` — the boot-await signal for env validation and `db.clj` (confirmed present at Job 01's merge; changing it is a breaking change requiring a brief) |
+| Storage dir under `--durability` (M4, Job 11) | `/var/lib/ratis-kv` is unchanged *for the server* — it becomes a lazyfs FUSE mount over the backing directory `/var/lib/ratis-kv.root`. The harness proves the mount per node at setup and aborts the run loudly if it cannot. Nothing exists (no mount, no lazyfs process) unless the run asks for it |
+| Both versions installed (M5, Job 12) | under `--mixed-version OLD,NEW` each node holds both tarballs and `/opt/ratis-kv` is a symlink flipped per node; the contract paths above are otherwise unchanged |
 | Join mode (M2, ratified at Job 08 merge) | `bin/ratis-kv --id <id> --peers <full 7-node address book> --storage /var/lib/ratis-kv --join` starts a server that forms **no group**: on fresh storage it hosts nothing until bootstrapped (`GroupManagementApi.add`, then committed by `setConfiguration`); existing storage is recovered instead, making `--join` the restart mode for dynamically-joined nodes. The contract startup line is emitted **unchanged** (in join mode `peers=` is the launch address book, not a formed conf), preceded by `ratis-kv join mode: id=<id> formed no group; awaiting GroupManagementApi.add (existing storage is recovered instead)` |
 
 ## 3. Environment — `env/`
@@ -256,6 +316,17 @@ exceptions before any cluster run trusts it.
   hostnames, `privileged: true` (iptables + SIGSTOP now, FUSE experiment
   later). **n6/n7 exist in the topology but run no SUT in M0** — they are
   the Q5 membership pool, pre-provisioned so M2 changes no plumbing.
+*Amended 2026-08-07 (Job 13): the image is `ubuntu:24.04`-based and is
+**built and validated on x86_64 only**. Nothing in the runtime image is
+arch-pinned, so an arm64 build is expected to work, but no arm64 machine
+has exercised it — treat it as untested (PLAN Q8's "multi-arch from day
+one" is therefore only half-delivered). The lazyfs build stage added at
+M4 is amd64-only by choice; on other architectures `/opt/lazyfs` is
+empty and a `--durability` run fails loudly at mount proof instead of
+silently testing nothing. Since M2, n6/n7 do run the SUT — on
+membership-bearing kinds only, which is what the pool was pre-provisioned
+for. `env/README.md` carries the operational detail.*
+
 - Entry point: `env/run.sh up|test|down` so dev and CI invoke identically
   (`test` = `clojure -M:run test --workload register --nemesis partition
   --ratis-version 3.2.2 ...` on the control node; `store/` bind-mounted out).
@@ -270,6 +341,23 @@ jobs = build SUT tarball once (upload as artifact), then a **matrix job per
 scenario** pulling the tarball, `env/run.sh up && test`, always-upload
 `store/**` (compressed) with a sane retention, `timeout-minutes: 60`.
 Nothing in M0's env may assume more than one scenario per machine.
+
+*Amended 2026-08-07 (Job 13), recording what `.github/workflows/jepsen.yml`
+actually offers as built (Job 06, extended by Jobs 09/11/12): the shape
+above holds — `workflow_dispatch` only, `build-sut` then a matrix job per
+scenario, always-upload compressed stores at 7-day retention,
+`timeout-minutes: 60`. The differences are: the input is **`scenarios`**
+(a comma-separated list parsed into the matrix by a step inside
+`build-sut`, which also validates it), not a single `scenario`; alongside
+`time-limit` and `ratis-version` there are now `mixed-version` (the
+OLD,NEW pair the `mv-*`/`rolling-upgrade` tokens require) and
+`ratis-repo-url` (an extra Maven repository, for a release candidate not
+yet on Central); `build-sut` builds one tarball per distinct version the
+dispatch needs; and a third job, **`red-gate`**, runs a short seeded-bug
+scenario that passes only if the harness fails it *and* a `results.edn`
+carries `:valid? false` — an infrastructure failure cannot masquerade as
+a catch. The durability tokens are deliberately absent from the default
+list (they make every runner build lazyfs).*
 
 ## 5. Validation procedure (the M0 exit gate)
 

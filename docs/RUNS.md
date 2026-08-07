@@ -3,6 +3,12 @@
 Reference runs, newest last. Summaries only — `store/` artifacts stay out
 of git; each entry names the command that reproduces it.
 
+*Note (Job 13, 2026-08-07): store directory names gained a
+`-ratis-<version>` (or `-mixed-<old>-<new>`) suffix at Job 12, when the
+version under test became part of a run's identity. Entries before the
+M5 section predate that and name their stores without it; they all ran
+at ratis 3.2.2, as their Versions lines say.*
+
 ## 2026-08-04 — M0 reference GREEN (Job 04 exit gate)
 
 - **Command**: `env/run.sh up && env/run.sh test --nemesis partition --time-limit 300`
