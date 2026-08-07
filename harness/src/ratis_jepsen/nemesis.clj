@@ -13,9 +13,10 @@
 ;; limitations under the License.
 
 (ns ratis-jepsen.nemesis
-  "Fault schedules (Job 05 M1 + Job 07 M2 part 1 + Job 08 M2 part 2):
-  none | partition | crash | pause | mixed | snapshot-churn | transfer |
-  membership | membership-snapshot-churn | listener-probe | mixed-all.
+  "Fault schedules (Job 05 M1 + Job 07 M2 part 1 + Job 08 M2 part 2 +
+  Job 11 M4): none | partition | crash | pause | mixed | snapshot-churn |
+  transfer | membership | membership-snapshot-churn | listener-probe |
+  quorum-pause | mixed-all | unsync-drop | unsync-drop-all | torn-write.
 
   Vocabulary — every nemesis op :f is unique across fault kinds, so one
   composed nemesis routes ops in every mode and history event names never
@@ -81,13 +82,55 @@
                            promote it to voter, demote it back, remove
                            it. Scripted once per run, never randomized.
 
+  Durability faults (Job 11, M4 — need the lazyfs storage topology,
+  which their kinds force on; see ratis-jepsen.db):
+
+    :unsync-drop / :unsync-restart
+                           the simulated power loss on a minority:
+                           kill -9 each target, then discard its
+                           un-synced lazyfs cache (fault ordering B from
+                           the Job 10 spike — process death first, then
+                           the storage loses what was never fsynced),
+                           later restart. Expectation GREEN: Ratis
+                           fsyncs each append before acknowledging, so
+                           nothing acknowledged is droppable
+    :unsync-drop-all / :unsync-restart-all
+                           the same fault on EVERY voter simultaneously
+                           — the whole-cluster power loss, where Raft's
+                           durability assumption is actually
+                           load-bearing. Expectation GREEN on safety; a
+                           temporary availability gap is legal and the
+                           liveness checker gates it via fault->heal
+                           like any other window
+    :torn-write / :torn-restart
+                           lazyfs torn-op on one follower's current open
+                           log segment: the next writes to it are
+                           counted and the occurrence-th is split, only
+                           its first part reaching the backing store,
+                           then lazyfs SIGKILLs itself — a power loss
+                           mid-write, torn at page granularity. The heal
+                           kills the SUT, remounts lazyfs over the torn
+                           backing store (re-proving the mount) and
+                           restarts: the node must either recover
+                           cleanly or refuse loudly (CorruptionPolicy
+                           EXCEPTION is the default); either outcome is
+                           recorded, a refusal does NOT fail the heal.
+                           Scripted ONCE per run: each tear may legally
+                           cost a node until the run ends, so repeating
+                           it would walk the cluster below its majority
+                           and convict Ratis for our own fault schedule
+
   Each kind's schedule is a self-contained *segment* — calm sleep, then
   fault/action ops, ending healed — so a run is a concatenation of
   segments that always starts calm and always heals one fault before the
   next begins (in mixed modes a pause can therefore never land on a node
   a previous crash left dead). `mixed` draws uniformly from the three M1
   kinds (unchanged); `mixed-all` draws uniformly from six (the M1 three,
-  snapshot churn, transfer, and a random membership move).
+  snapshot churn, transfer, and a random membership move) — the
+  durability kinds stay OUT of mixed-all: they are an opt-in storage
+  topology (the mount changes every node's storage stack and its
+  startup budget), not a fault to draw at random (Job 10 spike,
+  recommendation 1).
 
   Fault windows for the liveness checker (ratis-jepsen.checker) are
   derived from fault->heal: a window opens at a fault op's invocation and
@@ -97,13 +140,16 @@
   background and must not excuse a stalled majority, so only
   :member-replace-dead (a genuinely dead voter) opens a window."
   (:require [clojure.set :as set]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [jepsen.control :as c]
+            [jepsen.control.util :as cu]
             [jepsen.db :as jdb]
             [jepsen.generator :as gen]
             [jepsen.nemesis :as jn]
             [ratis-jepsen.client :as client]
-            [ratis-jepsen.db :as db])
+            [ratis-jepsen.db :as db]
+            [ratis-jepsen.env-contract :as env])
   (:import (org.apache.ratis.client RaftClient)
            (org.apache.ratis.protocol.exceptions AlreadyExistsException
                                                  SetConfigurationException)))
@@ -112,18 +158,32 @@
   "CLI-selectable fault schedules."
   #{"none" "partition" "crash" "pause" "mixed"
     "snapshot-churn" "transfer" "membership" "membership-snapshot-churn"
-    "listener-probe" "quorum-pause" "mixed-all"})
+    "listener-probe" "quorum-pause" "mixed-all"
+    "unsync-drop" "unsync-drop-all" "torn-write"})
+
+(def durability-kinds
+  "The fault schedules that inject storage-durability faults through
+  lazyfs (Job 11, M4). core.clj forces the --durability topology on for
+  these — an un-synced-drop against the plain filesystem would silently
+  test nothing."
+  #{"unsync-drop" "unsync-drop-all" "torn-write"})
 
 (def fault->heal
   "Each fault-opening op :f and the op :f that heals it. The single
   source of truth for the nemesis vocabulary; the liveness checker's
-  nemesis-aware gating is built from this map."
+  nemesis-aware gating is built from this map (which is how
+  unsync-drop-all's whole-cluster availability gap is legal: its window
+  spans fault invocation to heal completion plus grace, like any
+  other)."
   {:start               :stop
    :crash               :restart
    :pause               :resume
    :churn-kill          :churn-restart
    :member-replace-dead :member-replace-done
-   :quorum-pause        :quorum-resume})
+   :quorum-pause        :quorum-resume
+   :unsync-drop         :unsync-restart
+   :unsync-drop-all     :unsync-restart-all
+   :torn-write          :torn-restart})
 
 (def fault-fs (set (keys fault->heal)))
 (def heal-fs  (set (vals fault->heal)))
@@ -190,6 +250,36 @@
   three Q14 attempts, ledger.) Pinned cycle — a Q14 lever, not a
   general fault-soup member."
   {:calm-s 20 :fault-s 8})
+
+(def unsync-drop-cycle
+  "The minority power-loss cycle (Job 11): calm 20 s; kill -9 a random
+  minority and drop each one's un-synced lazyfs cache; down 10 s;
+  restart. Pinned (like partition and quorum-pause) — the cycle shape is
+  not what these runs vary."
+  {:calm-s 20 :fault-s 10})
+
+(def unsync-drop-all-cycle
+  "The whole-cluster power-loss cycle (Job 11): calm 50 s; kill -9 EVERY
+  voter and drop every cache; down 10 s; restart all. Pinned. The calm
+  stretch is sized by the knossos budget, not politeness: every write
+  invoked during a total outage ends :info (honestly ambiguous — the
+  dead leader may have appended it) and each stays forever-concurrent in
+  the linear checker, so windows/run × in-flight/window is a hard
+  analysis budget. The first shakedown at calm 25 s produced 8 windows,
+  135 :info and an :out-of-memory :unknown on every key (store
+  ratis-kv-register-unsync-drop-all/20260807T095908.783Z, preserved);
+  calm 50 s (4–5 windows) with the kind's 0.5 rate default
+  (core/workload-defaults) keeps per-key :info near the M0-proven
+  ~12."
+  {:calm-s 50 :fault-s 10})
+
+(def torn-write-cycle
+  "The torn-write script (Job 11): 30 s of calm writes so the victim's
+  open segment carries real traffic; arm the tear (it fires within the
+  next few appends); 10 s for the fire and the dead-storage window;
+  then the kill + remount + restart attempt. Runs ONCE per run — see
+  the ns docstring."
+  {:calm-s 30 :fault-s 10})
 
 (defn cycles
   "The per-kind cycles for a run: partition pinned (Job 04), the rest
@@ -402,6 +492,166 @@
            (catch Exception e
              (log/warn "pause-nemesis teardown resume failed:"
                        (.getMessage e)))))))
+
+;; ---------------------------------------------------------------------------
+;; Durability nemeses (Job 11, M4). All storage-side machinery — cache
+;; drops, torn-write arming, remounting, the mount evidence law — lives in
+;; ratis-jepsen.db; this nemesis owns targeting, ordering and recording.
+;; ---------------------------------------------------------------------------
+
+(defn- drop-unsynced!
+  "The per-node power loss, in fault ordering B (Job 10 spike): kill -9
+  the SUT first (power cut), then discard everything its storage never
+  fsynced. Returns the per-node record."
+  [t n]
+  (jdb/kill! (:db t) t n)
+  {:killed true
+   :drop   (db/clear-cache!)})
+
+(defn- startup-lines!
+  "How many contract startup lines the current node's SUT log holds —
+  restart detection must count NEW lines, because earlier lines from the
+  same run still match any whole-log grep."
+  []
+  (let [out (try (c/exec :bash :-c
+                         (str "grep -c 'ratis-kv server started: ' "
+                              env/log-file " 2>/dev/null || true"))
+                 (catch Exception _ "0"))]
+    (try (Long/parseLong (str/trim out))
+         (catch Exception _ 0))))
+
+(def torn-restart-await-ms
+  "How long the torn-write heal waits for the victim to either emit a
+  NEW startup line (recovered) or exit (refused). Bounded: a refusal is
+  a legal recorded outcome, not a run failure."
+  30000)
+
+(defn- await-start-or-refusal!
+  "After a restart attempt on a torn store: polls until a new startup
+  line appears (:started), the process dies (:refused-start), or the
+  deadline passes (:wedged). Never throws — every outcome is the
+  recorded result of the experiment."
+  [before-count]
+  (let [deadline (+ (System/nanoTime) (* torn-restart-await-ms 1000000))]
+    (loop []
+      (cond
+        (> (startup-lines!) before-count)
+        {:outcome :started}
+
+        (false? (cu/daemon-running? db/pid-file))
+        {:outcome  :refused-start
+         :log-tail (try (c/exec :bash :-c (str "tail -n 4 " env/log-file
+                                               " 2>/dev/null || true"))
+                        (catch Exception _ ""))}
+
+        (< (System/nanoTime) deadline)
+        (do (Thread/sleep 500) (recur))
+
+        :else
+        {:outcome  :wedged
+         :log-tail (try (c/exec :bash :-c (str "tail -n 4 " env/log-file
+                                               " 2>/dev/null || true"))
+                        (catch Exception _ ""))}))))
+
+(def torn-parts
+  "How many equal parts the torn write is split into (only part 1
+  persists — the head of the write survives, the tail dies with the
+  cache)."
+  3)
+
+(def torn-occurrence
+  "Which write to the armed segment file gets torn, counted from
+  arming. Small, so the fire lands within the next few appends while
+  the workload keeps writing."
+  3)
+
+(defn durability-nemesis
+  "Routes the durability fs. :unsync-drop / :unsync-drop-all kill and
+  cache-drop a minority / every voter (per-node results recorded; a
+  :send-failed drop is visible in the op AND in the evidence checker,
+  which fails a dedicated run that never dropped anything).
+  :torn-write arms lazyfs's torn-op on one follower's open segment;
+  :torn-restart re-collects the evidence, remounts the torn store and
+  restarts the victim, recording :started / :refused-start / :wedged as
+  a legal experiment outcome. Victim rides an atom between the
+  segment's ops (segments are atomic in every mode)."
+  []
+  (let [victim (atom nil)]
+    (reify jn/Nemesis
+      (setup! [this _test] this)
+
+      (invoke! [_this test op]
+        (case (:f op)
+          :unsync-drop
+          (let [nodes   (conf-nodes test)
+                targets (select-targets nodes nil
+                                        (target-count (count nodes)))]
+            (assoc op :value (c/on-nodes test targets drop-unsynced!)))
+
+          :unsync-drop-all
+          (assoc op :value
+                 (c/on-nodes test (conf-nodes test) drop-unsynced!))
+
+          (:unsync-restart :unsync-restart-all)
+          (assoc op :value
+                 (c/on-nodes test
+                             (fn [t node] (jdb/start! (:db t) t node))))
+
+          :torn-write
+          (let [nodes     (conf-nodes test)
+                leaders   (try (db/current-leaders! test)
+                               (catch Exception e
+                                 (log/warn "torn-write: leader census"
+                                           "failed:" (.getMessage e))
+                                 []))
+                followers (or (seq (remove (set leaders) nodes)) nodes)
+                target    (rand-nth (vec followers))
+                _         (reset! victim target)
+                result    (-> (c/on-nodes test [target]
+                                          (fn [_t _n]
+                                            (if-let [seg (db/current-open-segment!)]
+                                              {:segment seg
+                                               :armed   (db/torn-write! seg torn-parts torn-occurrence)}
+                                              {:armed :no-open-segment})))
+                              (get target))]
+            (assoc op :value (assoc result :victim target)))
+
+          :torn-restart
+          (let [target @victim]
+            (reset! victim nil)
+            (if-not target
+              (assoc op :value {:skip :no-victim})
+              (assoc op :value
+                     (-> (c/on-nodes test [target]
+                                     (fn [t n]
+                                       (let [fired? (db/torn-write-fired?)
+                                             _      (jdb/kill! (:db t) t n)
+                                             ;; remount even when the fault
+                                             ;; never fired: a fresh lazyfs
+                                             ;; clears the armed fault, so
+                                             ;; no tear can land at an
+                                             ;; uncontrolled later moment
+                                             remount
+                                             (try (db/remount-lazyfs! n)
+                                                  {:proven true}
+                                                  (catch Exception e
+                                                    {:proven false
+                                                     :error  (.getMessage e)}))]
+                                         (if-not (:proven remount)
+                                           ;; do NOT restart onto an unproven
+                                           ;; store — record it; the evidence
+                                           ;; checker fails the run
+                                           {:outcome :remount-unproven
+                                            :error   (:error remount)
+                                            :fired   fired?}
+                                           (let [before (startup-lines!)]
+                                             (jdb/start! (:db t) t n)
+                                             (assoc (await-start-or-refusal! before)
+                                                    :fired fired?))))))
+                         (get target)
+                         (assoc :victim target)))))))
+
+      (teardown! [_this _test]))))
 
 (defn churn-nemesis
   "The snapshot-churn nemesis (Job 07): :churn-kill kills one follower
@@ -623,8 +873,10 @@
 (defn- pool-return!
   "Returns `node` to the clean pool posture: mark it :dynamic FIRST (so
   the db-layer start below picks --join), then kill -9, wipe the raft
-  storage (the log survives — it is run evidence), and restart. On empty
-  storage the node hosts nothing and awaits a future add."
+  storage (the log survives — it is run evidence; on a durability run
+  the wipe goes THROUGH the live lazyfs mount, contents only), and
+  restart. On empty storage the node hosts nothing and awaits a future
+  add."
   [test matom node]
   (swap! matom (fn [s] (-> s
                            (update :voters disj node)
@@ -633,7 +885,7 @@
   (c/on-nodes test [node]
               (fn [t n]
                 (jdb/kill! (:db t) t n)
-                (db/wipe-storage!)
+                (db/wipe-storage! (boolean (:durability t)))
                 (jdb/start! (:db t) t n))))
 
 (defn- member-add!
@@ -913,6 +1165,9 @@
                #{:churn-kill :churn-transfer :churn-snapshot :churn-restart}
                (churn-nemesis)
                #{:transfer}       (transfer-nemesis)
+               #{:unsync-drop :unsync-restart :unsync-drop-all
+                 :unsync-restart-all :torn-write :torn-restart}
+               (durability-nemesis)
                #{:member-add :member-remove :member-replace-dead
                  :member-replace-done :listener-add :listener-census
                  :listener-promote :listener-demote :listener-remove}
@@ -941,6 +1196,29 @@
   "One quorum stall (pinned cycle; Q14 lever)."
   [_cycles]
   (segment :quorum-pause quorum-pause-cycle))
+
+(defn unsync-drop-segment
+  "One minority power-loss cycle (pinned)."
+  [_cycles]
+  (segment :unsync-drop unsync-drop-cycle))
+
+(defn unsync-drop-all-segment
+  "One whole-cluster power-loss cycle (pinned)."
+  [_cycles]
+  (segment :unsync-drop-all unsync-drop-all-cycle))
+
+(def torn-write-script
+  "The bounded torn-write experiment (Job 11), scripted ONCE per run:
+  calm writes, arm the tear on one follower's open segment, let it fire
+  and sit dead through the window, then kill + remount + restart and
+  record recovery or loud refusal. Finite on purpose — a refusal legally
+  costs the node for the rest of the run, and repeating the script would
+  walk the cluster below its majority (see the ns docstring). After the
+  script the nemesis idles and the run continues calm."
+  [(gen/sleep (:calm-s torn-write-cycle))
+   {:type :info, :f :torn-write}
+   (gen/sleep (:fault-s torn-write-cycle))
+   {:type :info, :f :torn-restart}])
 
 (defn churn-segment
   "One snapshot-churn cycle: calm; kill a follower; transfer leadership
@@ -1112,5 +1390,11 @@
                          :generator listener-probe-script}
        "quorum-pause"   {:nemesis   (full-nemesis)
                          :generator (cycle (quorum-pause-segment cs))}
+       "unsync-drop"    {:nemesis   (full-nemesis)
+                         :generator (cycle (unsync-drop-segment cs))}
+       "unsync-drop-all" {:nemesis   (full-nemesis)
+                          :generator (cycle (unsync-drop-all-segment cs))}
+       "torn-write"     {:nemesis   (full-nemesis)
+                         :generator torn-write-script}
        "mixed-all"      {:nemesis   (full-nemesis)
                          :generator (mixed-all-generator cs)}))))
