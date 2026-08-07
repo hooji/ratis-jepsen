@@ -508,7 +508,16 @@
   (log_inprogress_<start> with the highest start index) — the torn-write
   fault's target file. lazyfs keys torn faults on exact backing paths
   (README: 'the absolute path using the root directory'). Nil when no
-  open segment exists yet."
+  open segment exists yet.
+
+  Staleness note: segments roll (log_inprogress_N → log_N-M + a new
+  log_inprogress_M+1) at 8 MB or on a TERM CHANGE (Job 07's
+  source-verified rule), so an armed path goes stale if an election
+  lands between discovery and the tear. The torn-write schedule keeps
+  that window sub-second with no other fault running; if durability
+  kinds are ever composed with election-causing faults, the
+  never-fired tear shows up as a loud :no-durability-fault-evidence
+  red, never a silent green."
   []
   (let [out (try (c/exec :bash :-c
                          (str "find " env/storage-dir
