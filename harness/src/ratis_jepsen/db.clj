@@ -309,14 +309,29 @@
         "logfile=\"\"\n"
         (or injection ""))))
 
-(def torn-write-target
-  "The file the torn-write fault tears: the raft log segment the SUT is
-  actively appending to. The path is the one LAZYFS sees, which — with
-  `-o modules=subdir` — is the BACKING path, not the mountpoint path
-  (verified live: an injection keyed on the mountpoint path never fires,
-  one keyed on the backing path tears the write). The group uuid is the
-  SUT's compiled-in constant."
-  (str lazyfs-backing-dir "/" env/group-uuid "/current/log_inprogress_0"))
+(def lazyfs-backing-current-dir
+  "The SUT's `current/` directory as lazyfs sees it (backing path)."
+  (str lazyfs-backing-dir "/" env/group-uuid "/current"))
+
+(defn resolve-torn-target!
+  "The file the torn-write fault should tear: whichever log segment the
+  SUT is CURRENTLY appending to, resolved on the node at arm time.
+
+  Resolved rather than hardcoded because Ratis renames its open segment
+  on every restart — `log_inprogress_0` becomes `log_0-10` and a fresh
+  `log_inprogress_11` opens (observed in Job 10's rehearsal and again
+  here). A fixed `log_inprogress_0` therefore stops matching after the
+  first restart, which is exactly when this fault arms, so the
+  injection registered but never fired — two preserved runs' worth of
+  `:no-durability-fault-evidence` before the evidence law made the
+  cause obvious. Returns nil when no segment exists yet (first boot),
+  in which case nothing is armed."
+  []
+  (let [out (try (c/exec :bash :-c
+                         (str "ls -1t " lazyfs-backing-current-dir
+                              "/log_inprogress_* 2>/dev/null | head -n 1"))
+                 (catch Exception _ ""))]
+    (when-not (str/blank? out) (str/trim out))))
 
 (def torn-write-occurrence
   "Which write to the target file gets torn, counted from when the
@@ -341,7 +356,7 @@
   write surviving a power cut. Persisting parts 1 and 3 of 3 leaves a
   hole in the middle of the record, which is the shape a real torn
   sector takes."
-  ([] (torn-write-injection torn-write-target torn-write-occurrence 3 [1 3]))
+  ([file] (torn-write-injection file torn-write-occurrence 3 [1 3]))
   ([file occurrence parts persist]
    (str "[[injection]]\n"
         "type=\"torn-op\"\n"
@@ -424,14 +439,20 @@
   than only the first. The log is NOT truncated here: this run's earlier
   evidence must survive its own remounts."
   ([node] (remount-lazyfs! node nil))
-  ([node injection]
+  ([node torn?]
    (try (c/exec :fusermount3 :-u env/storage-dir)
         (catch Exception _ nil))
    (try (cu/stop-daemon! lazyfs-pid-file)
         (catch Exception _ nil))
    (c/exec :mkdir :-p lazyfs-backing-dir env/storage-dir)
    (c/exec :rm :-f lazyfs-fifo)
-   (cu/write-file! (lazyfs-config injection) lazyfs-config-file)
+   ;; Resolve the live segment AFTER the unmount (the backing store is
+   ;; directly readable then) and arm the tear on it.
+   (let [injection (when torn?
+                     (when-let [target (resolve-torn-target!)]
+                       (log/info node "arming torn-write on" target)
+                       (torn-write-injection target)))]
+     (cu/write-file! (lazyfs-config injection) lazyfs-config-file))
    (cu/start-daemon!
      {:logfile lazyfs-log-file
       :pidfile lazyfs-pid-file
@@ -603,10 +624,10 @@
     ;; already lands on lazyfs; a failed mount throws here and fails the
     ;; run before a single op is issued.
     (when durability
-      ;; torn-write arms on remount only, so the first cycle runs clean
-      ;; and its tear later lands on a log with committed entries.
-      (mount-lazyfs! node (when-not (:arm-on-remount-only? durability)
-                            (:injection durability))))
+      ;; No injection at setup: torn-write arms on REMOUNT, so the first
+      ;; cycle runs clean and the tear lands on a log that already holds
+      ;; committed entries (and on a segment name that exists).
+      (mount-lazyfs! node nil))
     (jdb/start! this test node)
     (await-startup! node))
 

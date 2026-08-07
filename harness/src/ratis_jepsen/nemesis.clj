@@ -1001,7 +1001,7 @@
                                           ;; torn storage.
                                           {:remount (db/remount-lazyfs!
                                                       node
-                                                      (get-in t [:db :durability :injection]))
+                                                      (get-in t [:db :durability :torn?]))
                                            :start (jdb/start! (:db t) t node)}))}))))
 
       (teardown! [_this _test]))))

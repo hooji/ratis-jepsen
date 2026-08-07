@@ -271,8 +271,7 @@
                         ;; runs clean so the tear lands on a log that
                         ;; already holds committed entries.
                         (= "torn-write" (:nemesis opts))
-                        (assoc :injection (db/torn-write-injection)
-                               :arm-on-remount-only? true)))
+                        (assoc :torn? true)))
         nodes       (if membership?
                       (vec env/all-nodes)
                       (:nodes opts))
