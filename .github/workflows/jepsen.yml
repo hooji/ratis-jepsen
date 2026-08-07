@@ -34,7 +34,14 @@ on:
           Comma-separated scenarios, one matrix runner each. A bare token
           is a --nemesis kind on the register workload; a counter-<kind>
           token (Job 09) runs the M3 counter workload under that nemesis
-          (e.g. counter-crash).
+          (e.g. counter-crash). Durability tokens (Job 11, M4; not in the
+          default sweep — dispatch explicitly): unsync-drop,
+          unsync-drop-all, torn-write, counter-unsync-drop. They run the
+          same way (the harness forces the lazyfs storage topology on
+          for those kinds) and cost extra runner time: the image build
+          compiles lazyfs (~2–3 min, every job pays it since each runner
+          builds the image) and each durability run adds mount setup on
+          all five nodes.
         type: string
         required: false
         default: none,partition,crash,pause,mixed,snapshot-churn,transfer,membership,membership-snapshot-churn,mixed-all,counter-crash

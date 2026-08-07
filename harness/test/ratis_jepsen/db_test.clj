@@ -232,3 +232,52 @@
                    "peers={n1=n1:6000}")]]]
       (testing why
         (is (nil? (re-find env/startup-line-pattern line)) line)))))
+
+;; ---------------------------------------------------------------------------
+;; Durability additions (Job 11, M4)
+;; ---------------------------------------------------------------------------
+
+(deftest durability-contract-pins
+  (testing "the env-contract values env/Dockerfile and db.clj share"
+    (is (= "/opt/lazyfs/lazyfs" env/lazyfs-bin))
+    (is (= "/var/lib/ratis-kv.root" env/backing-dir))
+    (is (= "/var/log/lazyfs.log" env/lazyfs-log-file)))
+  (testing "the backing dir is NOT the mountpoint (a same-path mount
+            would recurse into itself)"
+    (is (not= env/storage-dir env/backing-dir))))
+
+(deftest lazyfs-config-content
+  (let [toml (db/lazyfs-config)]
+    (testing "the fault fifo, sized cache, eviction off — the exact toml
+              surface the mount relies on"
+      (is (.contains toml "fifo_path=\"/run/lazyfs-faults.fifo\""))
+      (is (.contains toml (str "custom_size=\"" db/lazyfs-cache-size "\"")))
+      (is (.contains toml "apply_eviction=false"))
+      (is (.contains toml "blocks_per_page=1")))
+    (testing "no static [[injection]] blocks — faults are armed at
+              runtime through the fifo"
+      (is (not (.contains toml "[[injection]]"))))
+    (testing "eviction stays off: a full cache would silently write
+              through and defeat the drop faults (sizing note in
+              db/lazyfs-cache-size)"
+      (is (= "128mb" db/lazyfs-cache-size)))))
+
+(deftest torn-write-command-shape
+  (testing "the fifo command in the form the pinned lazyfs actually
+            accepts: exact backing path, parts, persist — and NO
+            occurrence attribute (the fifo parser silently drops the
+            whole fault when one is present; next-write semantics)"
+    (is (= (str "lazyfs::torn-op::file=/var/lib/ratis-kv.root/g/current/"
+                "log_inprogress_42::parts=3::persist=1")
+           (db/torn-write-command
+             "/var/lib/ratis-kv.root/g/current/log_inprogress_42" 3 1)))
+    (is (.endsWith (db/torn-write-command "/x" 3 2) "::persist=2"))
+    (is (not (.contains (db/torn-write-command "/x" 3 1) "occurrence"))))
+  (testing "no brackets ever appear (multi-value params travel bare on
+            the fifo, unlike the toml form)"
+    (is (not (.contains (db/torn-write-command "/x" 3 1) "[")))))
+
+(deftest mount-unproven-error-is-distinct
+  (testing "the evidence-law marker string is stable and shouting —
+            grep-able in CI output"
+    (is (= "DURABILITY MOUNT UNPROVEN" db/mount-unproven-error))))

@@ -617,3 +617,127 @@
              (cop 1 :invoke :add 3) (cop 1 :ok :add 3 {:observed 5})
              (cop 0 :ok :add 2 {:observed 2})]]
       (is (true? (:valid? (checker/check-counter-key h)))))))
+
+;; ---------------------------------------------------------------------------
+;; Durability-fault evidence (Job 11, M4)
+;; ---------------------------------------------------------------------------
+
+(def lazyfs-drop-log
+  "A lazyfs log slice around a clear-cache, phrasing from source at the
+  pinned commit (main.cpp spdlog calls)."
+  (str "[2026-08-07 10:00:00.000] [info] [lazyfs.faults.worker]: "
+       "waiting for fault commands...\n"
+       "[2026-08-07 10:01:00.000] [info] [lazyfs.faults.worker]: "
+       "received 'lazyfs::clear-cache'\n"))
+
+(def lazyfs-torn-log
+  "A lazyfs log slice around a fired torn-op (arming ack, persisted-part
+  write, self-kill)."
+  (str "[2026-08-07 10:02:00.000] [info] [lazyfs.faults.worker]: "
+       "configured successfully 'lazyfs::torn-op::file=/var/lib/"
+       "ratis-kv.root/g/current/log_inprogress_0::parts=3::persist=1"
+       "::occurrence=3'\n"
+       "[2026-08-07 10:02:01.000] [warning] [lazyfs.faults]: Write to "
+       "path /var/lib/ratis-kv.root/g/current/log_inprogress_0: will "
+       "persist 1365 bytes from offset 4096\n"
+       "[2026-08-07 10:02:01.001] [critical] Killing LazyFS pid 137!\n"))
+
+(deftest durability-evidence-counting
+  (let [counts (checker/count-durability-evidence
+                 {"n1" lazyfs-drop-log
+                  "n2" lazyfs-torn-log
+                  "n3" nil})]
+    (is (= 1 (get-in counts [:counts "n1" :clear-cache-ack])))
+    (is (= 0 (get-in counts [:counts "n1" :torn-fired])))
+    (is (= 1 (get-in counts [:counts "n2" :torn-armed])))
+    (is (= 1 (get-in counts [:counts "n2" :torn-fired])))
+    (is (= 1 (get-in counts [:counts "n2" :lazyfs-selfkill])))
+    (is (= 0 (get-in counts [:counts "n3" :clear-cache-ack])))))
+
+(deftest durability-ops-detection
+  (let [drop-op {:process :nemesis, :type :info, :f :unsync-drop}
+        all-op  {:process :nemesis, :type :info, :f :unsync-drop-all}
+        torn-op {:process :nemesis, :type :info, :f :torn-write}
+        client  {:process 0, :type :ok, :f :read, :value 1}]
+    (is (checker/unsync-ops? [client drop-op]))
+    (is (checker/unsync-ops? [client all-op]))
+    (is (not (checker/unsync-ops? [client torn-op])))
+    (is (checker/torn-ops? [client torn-op]))
+    (is (not (checker/torn-ops? [client drop-op])))
+    (testing "a client op with the same :f shape never counts"
+      (is (not (checker/unsync-ops? [{:process 3, :type :invoke,
+                                         :f :unsync-drop}]))))))
+
+(deftest torn-restart-result-extraction
+  (let [history [{:process :nemesis, :type :info, :f :torn-restart}
+                 {:process :nemesis, :type :info, :f :torn-restart,
+                  :value {:outcome :refused-start, :victim "n2",
+                          :fired true}}
+                 {:process 0, :type :ok, :f :read, :value 3}]]
+    (is (= [{:outcome :refused-start, :victim "n2", :fired true}]
+           (checker/torn-restart-results history)))))
+
+(deftest durability-verdict-decision
+  (let [drop-ev (checker/count-durability-evidence
+                  {"n1" lazyfs-drop-log, "n2" nil})
+        torn-ev (checker/count-durability-evidence
+                  {"n1" nil, "n2" lazyfs-torn-log})
+        no-ev   (checker/count-durability-evidence
+                  {"n1" nil, "n2" nil})]
+    (testing "not required: valid, counts still reported"
+      (let [v (checker/durability-verdict false false no-ev [])]
+        (is (:valid? v))
+        (is (= 0 (:clear-cache-acks v)))))
+    (testing "unsync required + at least one ack: valid"
+      (is (:valid? (checker/durability-verdict true false drop-ev []))))
+    (testing "unsync required + zero acks: the broken-test conviction"
+      (let [v (checker/durability-verdict true false no-ev [])]
+        (is (not (:valid? v)))
+        (is (= :no-durability-fault-evidence (:error v)))))
+    (testing "torn required + a fired tear + a recorded recovery: valid"
+      (is (:valid? (checker/durability-verdict
+                     false true torn-ev
+                     [{:outcome :refused-start, :fired true}]))))
+    (testing "torn required + armed but never fired: conviction, and no
+              stale-forensics tail on the note when none were recorded"
+      (let [armed-only (checker/count-durability-evidence
+                         {"n1" (str "[info] [lazyfs.faults.worker]: "
+                                    "configured successfully "
+                                    "'lazyfs::torn-op::file=/x'\n")})
+            v (checker/durability-verdict false true armed-only [])]
+        (is (not (:valid? v)))
+        (is (= :no-durability-fault-evidence (:error v)))
+        (is (not (re-find #"went stale" (:note v))))))
+    (testing "armed-but-never-fired with :armed-path-stale? forensics
+              (Ratis rolled the segment under the arm — restarts roll it
+              too, not just term change/8 MB): the conviction's note
+              carries the armed-vs-now diagnosis"
+      (let [armed-only (checker/count-durability-evidence
+                         {"n1" (str "[info] [lazyfs.faults.worker]: "
+                                    "configured successfully "
+                                    "'lazyfs::torn-op::file=/x'\n")})
+            v (checker/durability-verdict
+                false true armed-only
+                [{:outcome           :started
+                  :fired             false
+                  :armed-segment     "/r/g/current/log_inprogress_0"
+                  :open-segment-now  "/r/g/current/log_inprogress_11"
+                  :armed-path-stale? true}])]
+        (is (not (:valid? v)))
+        (is (= :no-durability-fault-evidence (:error v)))
+        (is (re-find #"armed path went stale" (:note v)))
+        (is (re-find #"rolls the open segment on every restart" (:note v)))
+        (is (re-find #"log_inprogress_0" (:note v)))
+        (is (re-find #"log_inprogress_11" (:note v)))))
+    (testing "torn required + fired but the remount unproven: the
+              recovery half never ran on lazyfs — conviction"
+      (let [v (checker/durability-verdict
+                false true torn-ev
+                [{:outcome :remount-unproven, :error "boom"}])]
+        (is (not (:valid? v)))
+        (is (= :torn-recovery-unproven (:error v)))))
+    (testing ":started and :wedged are recorded outcomes, not failures"
+      (is (:valid? (checker/durability-verdict
+                     false true torn-ev [{:outcome :started}])))
+      (is (:valid? (checker/durability-verdict
+                     false true torn-ev [{:outcome :wedged}]))))))

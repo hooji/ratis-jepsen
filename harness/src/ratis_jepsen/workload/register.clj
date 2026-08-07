@@ -129,6 +129,16 @@
                              {:require-evidence?
                               (= "membership-snapshot-churn"
                                  (:nemesis opts))})
+                           ;; Job 11's law: a dedicated durability run
+                           ;; must prove its lazyfs faults happened
+                           ;; (clear-cache acks / a fired tear plus a
+                           ;; re-proven remount).
+                           :durability-evidence
+                           (rj-checker/durability-evidence
+                             {:require-evidence?
+                              (contains? #{"unsync-drop" "unsync-drop-all"
+                                           "torn-write"}
+                                         (:nemesis opts))})
                            :stats      (checker/stats)
                            :exceptions (checker/unhandled-exceptions)}
                     gnuplot? (assoc :perf (checker/perf))))}))

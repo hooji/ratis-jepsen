@@ -26,16 +26,24 @@
   (is (= #{"none" "partition" "crash" "pause" "mixed"
            "snapshot-churn" "transfer" "membership"
            "membership-snapshot-churn" "listener-probe" "quorum-pause"
-           "mixed-all"}
-         nemesis/kinds)))
+           "mixed-all" "unsync-drop" "unsync-drop-all" "torn-write"}
+         nemesis/kinds))
+  (testing "durability kinds are CLI kinds and only those three"
+    (is (= #{"unsync-drop" "unsync-drop-all" "torn-write"}
+           nemesis/durability-kinds))
+    (is (set/subset? nemesis/durability-kinds nemesis/kinds))
+    (testing "and they are not membership kinds (5-voter topology)"
+      (is (empty? (set/intersection nemesis/durability-kinds
+                                    nemesis/membership-kinds))))))
 
 (deftest fault-heal-vocabulary
   (testing "every fault has exactly one heal; no f plays both roles"
     (is (= #{:start :crash :pause :churn-kill :member-replace-dead
-             :quorum-pause}
+             :quorum-pause :unsync-drop :unsync-drop-all :torn-write}
            nemesis/fault-fs))
     (is (= #{:stop :restart :resume :churn-restart :member-replace-done
-             :quorum-resume}
+             :quorum-resume :unsync-restart :unsync-restart-all
+             :torn-restart}
            nemesis/heal-fs))
     (is (empty? (set/intersection nemesis/fault-fs nemesis/heal-fs)))
     (is (= (count nemesis/fault-fs)
@@ -387,3 +395,62 @@
            (take 4 (:generator (nemesis/package "pause"))))))
   (testing "mixed: an infinite segment stream"
     (is (= 40 (count (take 40 (:generator (nemesis/package "mixed"))))))))
+
+;; ---------------------------------------------------------------------------
+;; Durability kinds (Job 11, M4)
+;; ---------------------------------------------------------------------------
+
+(def unsync-drop-segment-shape
+  [{:type :sleep, :value 20}
+   {:type :info, :f :unsync-drop}
+   {:type :sleep, :value 10}
+   {:type :info, :f :unsync-restart}])
+
+(def unsync-drop-all-segment-shape
+  ;; calm 70 / window 5: pinned by the knossos :info budget, not
+  ;; politeness — see nemesis/unsync-drop-all-cycle.
+  [{:type :sleep, :value 70}
+   {:type :info, :f :unsync-drop-all}
+   {:type :sleep, :value 5}
+   {:type :info, :f :unsync-restart-all}])
+
+(deftest durability-segment-shapes
+  (testing "unsync cycles: pinned calm, kill+drop, down window, restart"
+    (is (= unsync-drop-segment-shape
+           (nemesis/unsync-drop-segment default-cycles)))
+    (is (= unsync-drop-all-segment-shape
+           (nemesis/unsync-drop-all-segment default-cycles))))
+  (testing "torn-write: the FINITE one-shot script (arm, window, recover)
+            — a second tear could walk the cluster below its majority"
+    (is (= [{:type :sleep, :value 30}
+            {:type :info, :f :torn-write}
+            {:type :sleep, :value 10}
+            {:type :info, :f :torn-restart}]
+           nemesis/torn-write-script))
+    (is (= 4 (count nemesis/torn-write-script)))))
+
+(deftest package-durability-kinds
+  (testing "unsync kinds cycle their pinned segments"
+    (is (= unsync-drop-segment-shape
+           (take 4 (:generator (nemesis/package "unsync-drop")))))
+    (is (= unsync-drop-all-segment-shape
+           (take 4 (:generator (nemesis/package "unsync-drop-all"))))))
+  (testing "torn-write: the finite script, verbatim"
+    (is (= nemesis/torn-write-script
+           (:generator (nemesis/package "torn-write")))))
+  (testing "mixed-all stays durability-free (opt-in topology): none of
+            its drawn segments contains a durability f"
+    (let [durability-fs #{:unsync-drop :unsync-restart :unsync-drop-all
+                          :unsync-restart-all :torn-write :torn-restart}
+          fs (->> (:generator (nemesis/package "mixed-all"))
+                  (take 400)
+                  (keep :f)
+                  set)]
+      (is (empty? (set/intersection durability-fs fs))))))
+
+(deftest torn-write-fault-parameters
+  (testing "the tear splits into 3 parts and by default persists the
+            head (the sequential-power-loss shape; --torn-persist-part
+            2 selects the refusal-biased hole shape)"
+    (is (= 3 nemesis/torn-parts))
+    (is (= 1 nemesis/default-torn-persist-part))))

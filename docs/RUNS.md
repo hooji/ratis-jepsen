@@ -416,3 +416,84 @@ all preserved:**
    own right: **the documented expiry hazard is timeout-shaped, not
    crash-shaped** — process death at LAN latencies cannot reach it,
    sustained ambiguity (quorum loss, freezes, slow disks) can.
+
+## 2026-08-07 — M4 gates: durability faults via lazyfs (Job 11)
+
+- **Commands**: `env/run.sh test --nemesis <kind> --time-limit 300`
+  (bare — the durability kinds force the lazyfs storage topology on and
+  carry their own workload defaults); regression:
+  `env/run.sh test --nemesis partition --time-limit 300` (durability
+  off); counter gate: `--workload counter --nemesis unsync-drop`.
+- **Versions**: ratis 3.2.2, jepsen 0.3.13, SUT `ratis-kv
+  0.1.0-SNAPSHOT` (unchanged — no SUT edits this job), JDK 21, lazyfs
+  `045a0b3a1126725e693934e29d3ba15e08cc39ec` baked into the env image.
+- **Topology**: every voter's `/var/lib/ratis-kv` is a lazyfs FUSE
+  mount over `/var/lib/ratis-kv.root`, proven per node at setup
+  (mount-table type + fault fifo + fsync'd canary observed in the
+  backing dir); un-synced page cache droppable per node on command.
+
+| Run | Exit | Wall | Analysis | ok / fail / info | Fault evidence | Store (`20260807T…`) |
+|---|---|---|---|---|---|---|
+| durability topology, no faults | 0 | 52 s (30 s limit) | 0.5 s | 1093 / 407 / 0 | mounts proven ×5 | `…register-none-durability/095125.774Z` |
+| unsync-drop | 0 | 318 s | 0.5 s | 1059 / 441 / 0 | 17 clear-cache acks / 10 cycles | `…register-unsync-drop/095257.921Z` |
+| unsync-drop-all | 0 | 321 s | 8.2 s | 989 / 392 / 95 | 20 acks = 4 cycles × 5 nodes | `…register-unsync-drop-all/102348.341Z` |
+| torn-write | 0 | 87 s total | 0.7 s | 1082 / 418 / 0 | 1 tear fired; victim **refused loudly**; majority served | `…register-torn-write/103745.994Z` |
+| counter + unsync-drop | 0 | 315 s | 0.6 s | 2091 / 3 / 27 | 15 acks; 201 retries / 78 ops | `…counter-unsync-drop/103952.853Z` |
+| partition regression (durability off) | 0 | 310 s | 0.8 s | 1078 / 406 / 16 | inert: no mount/daemon/log on any node | `…register-partition/104527.900Z` |
+| **negative arm** (n3 lazyfs stubbed) | **255** | aborted in setup | — | — | `DURABILITY MOUNT UNPROVEN on n3 (:mount-await)` | `…register-none-durability/105338.963Z` (jepsen.log) |
+
+**unsync-drop / unsync-drop-all (expectation GREEN — met):** kill -9
+then `lazyfs::clear-cache` (power-loss ordering B) on a random minority
+/ on every voter at once; every acknowledged write survived every drop
+— linearizability, liveness (nemesis-gated windows) and the counter
+bounds all `:valid? true`. The whole-cluster run recovers through a
+full restart + election each cycle; its 95 `:info` ops are the honest
+ambiguity of writes invoked during total outage.
+
+**torn-write (expectation recover-or-refuse-loudly — met, refusal
+arm):** lazyfs tore the victim's next log append mid-write (persisted
+`16 bytes from offset 51333` of a ~48 B batch, then killed itself —
+cache gone). On restart over the torn store, ratis-3.2.2 with the
+default `CorruptionPolicy=EXCEPTION` **refused to start**:
+`ChecksumException: Log entry corrupted: Calculated checksum is
+0A482F49 but read checksum is 00000000` → `Failed to initRaftLog` (the
+checksum bytes fell in the dropped tail; recorded verbatim in the
+`:torn-restart` op and `n3/ratis-kv.log`). The 4/5 majority served the
+full 1500-op budget linearizably throughout. No silent wrong data, no
+lost acknowledged write. (The run ends ~55 s in: the torn script and
+the op budget are both finite; the tear fired mid-write-stream at
+t≈30 s.)
+
+**Metadata-durability probe** (`harness/scripts/metadata-probe.sh`, 3
+cycles, PASS): Ratis persists term/votedFor synchronously *before*
+acting on a vote and fsyncs the file (source: `requestVote`/
+`initElection` → `persistMetadata` → `AtomicFileOutputStream` with
+`FileChannel.force(true)` before the rename). Experiment concurs: across
+three forced elections the victim's `raft-meta` never diverged
+mount-vs-backing in 609 samples at ~20 ms, and after kill +
+cache-drop + restart its term never regressed below the term it voted
+in (acted=2/3/4, recovered=2/3/4). Caveat for the record: the rename
+itself is not followed by a parent-directory fsync — a real-power-loss
+edge *outside* lazyfs's model (lazyfs passes renames through) —
+details in the Job 11 report.
+
+**Analysis-budget artifacts, preserved deliberately:** the first two
+unsync-drop-all shapes OOMed knossos on every key
+(`…unsync-drop-all/095908.783Z` — 8 windows, 135 `:info`;
+`…101150.734Z` — 4 windows, 2 workers/key): a thread parks one
+forever-concurrent `:info` write per ~5 s of total outage regardless of
+rate. The shipped shape (calm 70 s / window 5 s / 10 keys × 1 worker)
+keeps ~5–13 `:info`/key and analysis at 8.2 s. Also preserved:
+`…torn-write/102955.099Z` — the first torn attempt, correctly FAILED by
+the evidence checker (`torn-armed 1, torn-fired 0`): the fifo-armed
+fault had been silently dropped by lazyfs's parser (it rejects
+`occurrence=` for torn-op while still logging "configured
+successfully"; two lazyfs bugs, documented in the report). The armed
+form without `occurrence=` tears the next write, verified live.
+
+**Costs** (4-core host; hosted runners are comparable): the lazyfs
+image stage adds **1 m 54 s** to every cold image build (each CI runner
+pays it); DB setup per durability run is **6–8 s** vs **4.7 s** plain —
+the five 128 MiB cache pre-allocations run in parallel and cost ~2–3 s
+total, far below the spike's 8 s/GiB-per-mount worry because the cache
+is sized deliberately (see `db/lazyfs-cache-size`).

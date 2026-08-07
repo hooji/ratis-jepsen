@@ -105,6 +105,16 @@
                            (rj-checker/retry-evidence
                              {:require-evidence?
                               (not= "none" (:nemesis opts))})
+                           ;; Job 11: durability × exactly-once — a
+                           ;; counter run under a durability kind owes
+                           ;; the same fault evidence as the register
+                           ;; workload.
+                           :durability-evidence
+                           (rj-checker/durability-evidence
+                             {:require-evidence?
+                              (contains? #{"unsync-drop" "unsync-drop-all"
+                                           "torn-write"}
+                                         (:nemesis opts))})
                            :stats      (checker/stats)
                            :exceptions (checker/unhandled-exceptions)}
                     gnuplot? (assoc :perf (checker/perf))))}))

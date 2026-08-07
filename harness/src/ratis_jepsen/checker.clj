@@ -750,3 +750,147 @@
      (reify checker/Checker
        (check [_this _test history _copts]
          (retry-verdict require? (retry-totals history)))))))
+
+;; ---------------------------------------------------------------------------
+;; Durability-fault evidence (Job 11, M4): the Job 07/08/09 law applied to
+;; the lazyfs faults. A durability run must PROVE its faults happened:
+;; un-synced-drop runs owe clear-cache acknowledgements in the nodes'
+;; lazyfs logs (a drop-nothing run tested nothing), and a torn-write run
+;; owes both the tear itself (lazyfs logs the persisted-part writes and
+;; its own self-kill when the fault fires) and a recorded recovery
+;; attempt on the victim (the :torn-restart op's outcome — a victim whose
+;; remount could not be re-proven means the second half of the experiment
+;; never ran on lazyfs). Judged from the snarfed store copies of
+;; lazyfs.log plus the history's op values.
+;;
+;; The lazyfs lines, pinned from source at the Job 10 commit (main.cpp /
+;; lazyfs.cpp spdlog calls) and observed live in shakedown:
+;;
+;;   [lazyfs.faults.worker]: received 'lazyfs::clear-cache'   (the ack)
+;;   [lazyfs.faults.worker]: configured successfully 'lazyfs::torn-op…'
+;;   [lazyfs.faults]: Write to path …: will persist 1365 bytes from offset …
+;;   Killing LazyFS pid 137!                                   (self-kill)
+;; ---------------------------------------------------------------------------
+
+(def durability-fault-patterns
+  "Lazyfs-log lines that prove durability faults happened."
+  {:clear-cache-ack #"received 'lazyfs::clear-cache'"
+   :torn-armed      #"configured successfully 'lazyfs::torn-op"
+   :torn-fired      #"will persist \d+ bytes from offset"
+   :lazyfs-selfkill #"Killing LazyFS pid \d+"})
+
+(defn count-durability-evidence
+  "Pure: {node lazyfs-log-content} in, per-node and total pattern counts
+  out (same shape as count-install-evidence)."
+  [node->content]
+  (count-install-evidence node->content durability-fault-patterns))
+
+(defn unsync-ops?
+  "Does this history contain un-synced-drop nemesis activity?"
+  [history]
+  (boolean (some #(and (not (client-op? %))
+                       (#{:unsync-drop :unsync-drop-all} (:f %)))
+                 history)))
+
+(defn torn-ops?
+  "Does this history contain torn-write nemesis activity?"
+  [history]
+  (boolean (some #(and (not (client-op? %)) (= :torn-write (:f %)))
+                 history)))
+
+(defn torn-restart-results
+  "The recorded :torn-restart outcomes (completion op values) from a
+  history."
+  [history]
+  (->> history
+       (remove client-op?)
+       (filter #(= :torn-restart (:f %)))
+       (keep :value)
+       (filterv map?)))
+
+(defn durability-verdict
+  "Pure: the durability-evidence decision. unsync-required? demands ≥ 1
+  clear-cache acknowledgement; torn-required? demands ≥ 1 fired tear in
+  the lazyfs logs AND every recorded :torn-restart to have re-proven its
+  remount (an outcome other than :remount-unproven; :started,
+  :refused-start and :wedged are all legal recorded experiment results —
+  the run's other checkers grade their client-visible effects). A
+  no-fire conviction quotes any :armed-path-stale? forensics the heal
+  recorded (armed segment vs the open segment at heal time): segments
+  roll on every restart, term change or 8 MB, so a roll landing between
+  arming and the tear self-identifies in the verdict."
+  [unsync-required? torn-required? {:keys [counts] :as evidence} restarts]
+  (let [total-of   (fn [k] (reduce + 0 (keep #(get % k) (vals counts))))
+        drops      (total-of :clear-cache-ack)
+        fires      (total-of :torn-fired)
+        unproven   (filterv #(= :remount-unproven (:outcome %)) restarts)
+        base       {:clear-cache-acks drops
+                    :torn-fired       fires
+                    :torn-armed       (total-of :torn-armed)
+                    :lazyfs-selfkills (total-of :lazyfs-selfkill)
+                    :torn-restarts    restarts
+                    :counts           counts}]
+    (cond
+      (and unsync-required? (zero? drops))
+      (assoc base :valid? false
+             :error :no-durability-fault-evidence
+             :note (str "un-synced-drop nemesis ran but no lazyfs log "
+                        "acknowledges a clear-cache — the run never "
+                        "dropped anything and tested nothing"))
+
+      (and torn-required? (zero? fires))
+      (let [stale (filterv :armed-path-stale? restarts)]
+        (assoc base :valid? false
+               :error :no-durability-fault-evidence
+               :note (str "torn-write nemesis ran but no lazyfs log shows "
+                          "a fired torn-op (persisted-part write) — the "
+                          "tear never landed and the run tested nothing"
+                          (when (seq stale)
+                            (str "; the heal's forensics show the armed path"
+                                 " went stale before any write — Ratis rolls"
+                                 " the open segment on every restart, term"
+                                 " change or 8 MB — "
+                                 (pr-str (mapv #(select-keys
+                                                  % [:armed-segment
+                                                     :open-segment-now])
+                                               stale)))))))
+
+      (and torn-required? (seq unproven))
+      (assoc base :valid? false
+             :error :torn-recovery-unproven
+             :note (str "the torn victim's remount could not be re-proven"
+                        " (" (pr-str (mapv :error unproven)) ") — the "
+                        "recovery half of the experiment never ran on "
+                        "lazyfs"))
+
+      :else
+      (assoc base :valid? true
+             :note (when-not (or unsync-required? torn-required?)
+                     "durability evidence not required for this run")))))
+
+(defn- node-lazyfs-log-content
+  "The snarfed store copy of a node's lazyfs log, or nil when absent
+  (non-durability runs collect none)."
+  [test node]
+  (let [f (store/path test (name node) "lazyfs.log")]
+    (when (.exists ^java.io.File f)
+      (slurp f))))
+
+(defn durability-evidence
+  "The durability-fault evidence checker. Composed unconditionally;
+  counts always reported; REQUIRED only when :require-evidence? (the
+  workloads set it for the dedicated durability kinds) and the matching
+  ops actually appear in the history."
+  ([] (durability-evidence {}))
+  ([opts]
+   (let [require? (boolean (:require-evidence? opts))]
+     (reify checker/Checker
+       (check [_this test history _copts]
+         (durability-verdict
+           (and require? (unsync-ops? history))
+           (and require? (torn-ops? history))
+           (count-durability-evidence
+             (into {}
+                   (map (fn [node] [node (node-lazyfs-log-content test node)]))
+                   (:nodes test)))
+           (torn-restart-results history)))))))

@@ -71,12 +71,39 @@ disagree, DESIGN wins.
 Compose service names equal hostnames `n1..n7` exactly (the harness's node
 list uses those literal names). `n6`/`n7` are up but run no SUT in M0.
 
+## lazyfs (durability faults, Job 11 / M4)
+
+The image carries a [lazyfs](https://github.com/dsrhaslab/lazyfs) binary at
+`/opt/lazyfs/lazyfs`, built in a throwaway Docker stage at the Job 10
+spike's pinned commit (`045a0b3a1126725e693934e29d3ba15e08cc39ec`; the
+project's main branch is explicitly unstable, so the pin is load-bearing —
+re-verify the build before bumping it). The build pre-clones spdlog
+`v1.10.0` and feeds it to libpcache's CMake via
+`FETCHCONTENT_SOURCE_DIR_SPDLOG` instead of letting FetchContent pull a
+GitHub archive tarball — the spike's accommodation for TLS-inspecting
+proxies that 403 archive downloads; on open networks it changes nothing.
+The runtime image adds only `libfuse3-3` + `fuse3` and `user_allow_other`
+in `/etc/fuse.conf`.
+
+All of it is **inert unless a harness run passes `--durability`** (or a
+durability nemesis, which forces it): no mount exists, no lazyfs process
+runs, and every other scenario behaves exactly as before. With
+`--durability`, the harness mounts each node's `/var/lib/ratis-kv` as a
+lazyfs FUSE mount over the backing dir `/var/lib/ratis-kv.root`, proving
+the mount per node and failing the run loudly if it cannot. FUSE mounts
+need `/dev/fuse`, which the privileged db-node containers get from the
+host kernel.
+
 ## Architecture support
 
-Nothing in the image is arch-pinned: the base `ubuntu:24.04` is a
+Nothing in the runtime image is arch-pinned: the base `ubuntu:24.04` is a
 multi-arch manifest, all packages (OpenJDK 21 included) come from apt,
 which resolves per-architecture, and the Clojure CLI is pure-JVM installed
-by the official arch-neutral installer script.
+by the official arch-neutral installer script. The one exception is the
+lazyfs build stage, which runs on amd64 only (PLAN Q8: lazyfs is
+x86-CI-only for now): on other arches `/opt/lazyfs` is empty, every
+non-durability scenario is unaffected, and a `--durability` run fails
+loudly at mount proof.
 
 - **x86_64**: built and fully validated (image build, 8-node topology,
   `validate.sh` green) on Linux x86_64.
