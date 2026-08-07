@@ -228,10 +228,21 @@
   defaults (10.0, 300). Explicit CLI values always win."
   [opts]
   (let [sustained? (or (= "membership-snapshot-churn" (:nemesis opts))
-                       (= "counter" (:workload opts)))]
+                       (= "counter" (:workload opts)))
+        ;; unsync-drop-all takes the WHOLE cluster down every cycle, so a
+        ;; quarter of the run is a total outage and the ambiguous-write
+        ;; (:info) count is inherently high — 122 in the first gate run,
+        ;; which pushed knossos past its documented memory cliff
+        ;; (DESIGN 6; Job 07 hit the same wall at 147). DESIGN 2.5's
+        ;; sanctioned lever is to shrink the per-key history and say so,
+        ;; which is what this does; the fault, its evidence and the
+        ;; safety question are all unchanged.
+        all-down?  (= "unsync-drop-all" (:nemesis opts))]
     (-> opts
         (update :rate        #(or % (if sustained? 1.4 10.0)))
-        (update :ops-per-key #(or % (if sustained? 800 300))))))
+        (update :ops-per-key #(or % (cond sustained? 800
+                                          all-down?  150
+                                          :else      300))))))
 
 (defn ratis-test
   "Builds the test map from parsed CLI options: register workload +

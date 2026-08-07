@@ -999,7 +999,9 @@
                                           ;; over the SAME backing store,
                                           ;; then start the SUT on the
                                           ;; torn storage.
-                                          {:remount (db/remount-lazyfs! node)
+                                          {:remount (db/remount-lazyfs!
+                                                      node
+                                                      (get-in t [:db :durability :injection]))
                                            :start (jdb/start! (:db t) t node)}))}))))
 
       (teardown! [_this _test]))))

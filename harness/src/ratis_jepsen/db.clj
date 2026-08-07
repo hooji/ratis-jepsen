@@ -379,6 +379,9 @@
   (c/exec :rm :-rf lazyfs-backing-dir)
   (c/exec :mkdir :-p lazyfs-backing-dir env/storage-dir)
   (c/exec :rm :-f lazyfs-fifo)
+  ;; Truncate the log: it is this run's EVIDENCE, and a stale mount line
+  ;; from a previous run must never satisfy the evidence law.
+  (c/exec :bash :-c (str ": > " lazyfs-log-file))
   (cu/write-file! (lazyfs-config injection) lazyfs-config-file)
   (cu/start-daemon!
     {:logfile lazyfs-log-file
@@ -407,31 +410,33 @@
   the mount must be rebuilt before the SUT can restart; wiping the
   backing store instead would erase committed data that exists nowhere
   else, which is an out-of-model fault (BACKLOG item 4), not a power
-  cut. The re-armed config carries no injection: one torn write per
-  cycle is the fault, an endless loop of them is not."
-  [node]
-  (try (c/exec :fusermount3 :-u env/storage-dir)
-       (catch Exception _ nil))
-  (try (cu/stop-daemon! lazyfs-pid-file)
-       (catch Exception _ nil))
-  (c/exec :mkdir :-p lazyfs-backing-dir env/storage-dir)
-  (c/exec :rm :-f lazyfs-fifo)
-  (cu/write-file! (lazyfs-config) lazyfs-config-file)
-  (cu/start-daemon!
-    {:logfile lazyfs-log-file
-     :pidfile lazyfs-pid-file
-     :chdir   "/"
-     :match-executable? false}
-    lazyfs-bin
-    env/storage-dir
-    "--config-path" lazyfs-config-file
-    "-o" "allow_other"
-    "-o" "modules=subdir"
-    "-o" (str "subdir=" lazyfs-backing-dir)
-    "-s"
-    "-f")
-  (await-mount! node)
-  :remounted)
+  cut. Any `injection` is re-armed, so every cycle tears a write rather
+  than only the first. The log is NOT truncated here: this run's earlier
+  evidence must survive its own remounts."
+  ([node] (remount-lazyfs! node nil))
+  ([node injection]
+   (try (c/exec :fusermount3 :-u env/storage-dir)
+        (catch Exception _ nil))
+   (try (cu/stop-daemon! lazyfs-pid-file)
+        (catch Exception _ nil))
+   (c/exec :mkdir :-p lazyfs-backing-dir env/storage-dir)
+   (c/exec :rm :-f lazyfs-fifo)
+   (cu/write-file! (lazyfs-config injection) lazyfs-config-file)
+   (cu/start-daemon!
+     {:logfile lazyfs-log-file
+      :pidfile lazyfs-pid-file
+      :chdir   "/"
+      :match-executable? false}
+     lazyfs-bin
+     env/storage-dir
+     "--config-path" lazyfs-config-file
+     "-o" "allow_other"
+     "-o" "modules=subdir"
+     "-o" (str "subdir=" lazyfs-backing-dir)
+     "-s"
+     "-f")
+   (await-mount! node)
+   :remounted))
 
 (defn unmount-lazyfs!
   "Unmounts lazyfs and stops its daemon. Tolerant: teardown must finish

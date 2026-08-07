@@ -34,10 +34,12 @@ on:
           Comma-separated scenarios, one matrix runner each. A bare token
           is a --nemesis kind on the register workload; a counter-<kind>
           token (Job 09) runs the M3 counter workload under that nemesis
-          (e.g. counter-crash).
+          (e.g. counter-crash). The M4 durability kinds (unsync-drop,
+          unsync-drop-all, torn-write) mount lazyfs on every node — they
+          need no extra flags and cost ~0.3 s more startup per run.
         type: string
         required: false
-        default: none,partition,crash,pause,mixed,snapshot-churn,transfer,membership,membership-snapshot-churn,mixed-all,counter-crash
+        default: none,partition,crash,pause,mixed,snapshot-churn,transfer,membership,membership-snapshot-churn,mixed-all,counter-crash,unsync-drop,unsync-drop-all,torn-write
       time-limit:
         description: Workload seconds per scenario run (harness --time-limit)
         type: string

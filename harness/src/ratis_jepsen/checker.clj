@@ -773,27 +773,45 @@
   #"fuse\.lazyfs")
 
 (def drop-evidence-pattern
-  "lazyfs's acknowledgement of a cache-clearing fault command."
-  #"(?i)clear.cache|cache cleared|faults.worker")
+  "lazyfs's acknowledgement of a cache-clearing fault command
+  (observed verbatim: \"[lazyfs.faults.worker]: received
+  'lazyfs::clear-cache'\")."
+  #"received 'lazyfs::clear-cache'")
+
+(def torn-evidence-pattern
+  "lazyfs's own line when a torn-op fault fires and it persists only
+  some parts of a write (observed verbatim: \"[lazyfs.faults]: Going to
+  persist the write 1 for the path …\"). A torn-write run that never
+  tore anything tested nothing."
+  #"Going to persist the write")
 
 (defn count-mount-evidence
   "Pure: {node log-content} in, {:mounted #{nodes}, :unmounted #{nodes},
-  :drops {node n}} out."
+  :drops {node n}, :tears {node n}} out. Each node's log is truncated at
+  mount time (db/mount-lazyfs!), so these counts are this run's only."
   [node->content]
   (reduce (fn [acc [node content]]
-            (let [lines (str/split-lines (or content ""))
+            (let [lines  (str/split-lines (or content ""))
                   mount? (boolean (some #(re-find mount-evidence-pattern %) lines))
-                  drops  (count (filter #(re-find drop-evidence-pattern %) lines))]
+                  drops  (count (filter #(re-find drop-evidence-pattern %) lines))
+                  tears  (count (filter #(re-find torn-evidence-pattern %) lines))]
               (-> acc
                   (update (if mount? :mounted :unmounted) conj node)
-                  (assoc-in [:drops node] drops))))
-          {:mounted #{} :unmounted #{} :drops {}}
+                  (assoc-in [:drops node] drops)
+                  (assoc-in [:tears node] tears))))
+          {:mounted #{} :unmounted #{} :drops {} :tears {}}
           node->content))
 
 (defn mount-evidence-verdict
   "Pure: the mount-evidence decision. Required only for durability runs;
-  every node must show its mount."
-  [required? {:keys [mounted unmounted drops] :as ev}]
+  every node must show its mount, and the fault must have reached the
+  filesystem at least once (`fault-kind` :drop or :tear names which
+  acknowledgement proves it)."
+  ([required? ev] (mount-evidence-verdict required? ev nil))
+  ([required? {:keys [mounted unmounted drops tears] :as ev} fault-kind]
+   (let [fault-total (reduce + 0 (vals (case fault-kind
+                                         :tear tears
+                                         (or drops {}))))]
   (cond
     (not required?)
     (assoc ev :valid? true
@@ -811,16 +829,24 @@
            :error :no-lazyfs-mount-evidence
            :note "no node produced a lazyfs log at all")
 
+    (and fault-kind (zero? fault-total))
+    (assoc ev :valid? false
+           :error :no-durability-fault-evidence
+           :note (str "every node mounted, but lazyfs never acknowledged a "
+                      (name fault-kind) " fault — the run injected nothing"))
+
     :else
     (assoc ev :valid? true
-           :total-drops (reduce + 0 (vals drops)))))
+           :total-drops (reduce + 0 (vals drops))
+           :total-tears (reduce + 0 (vals tears)))))))
 
 (defn mount-evidence
   "The mount-evidence checker; REQUIRED when :require-evidence? (the
   workloads set it for durability nemeses)."
   ([] (mount-evidence {}))
   ([opts]
-   (let [require? (boolean (:require-evidence? opts))]
+   (let [require? (boolean (:require-evidence? opts))
+         fault-kind (:fault-kind opts)]
      (reify checker/Checker
        (check [_this test _history _copts]
          (mount-evidence-verdict
@@ -831,4 +857,5 @@
                           [(name node)
                            (let [f (store/path test (name node) "lazyfs.log")]
                              (when (.exists ^java.io.File f) (slurp f)))]))
-                   (:nodes test)))))))))
+                   (:nodes test)))
+           fault-kind))))))

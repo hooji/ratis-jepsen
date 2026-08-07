@@ -106,7 +106,15 @@
                            (rj-checker/mount-evidence
                              {:require-evidence?
                               (contains? nemesis/durability-kinds
-                                         (:nemesis opts))})
+                                         (:nemesis opts))
+                              ;; the fault must also have REACHED the
+                              ;; filesystem: a tear for torn-write, a
+                              ;; cache drop for the unsync kinds
+                              :fault-kind
+                              (case (:nemesis opts)
+                                "torn-write" :tear
+                                ("unsync-drop" "unsync-drop-all") :drop
+                                nil)})
                            ;; Counts always reported; REQUIRED (zero ⇒
                            ;; invalid) only for dedicated snapshot-churn
                            ;; runs, whose write stream is sized to cross
