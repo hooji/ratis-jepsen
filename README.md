@@ -43,6 +43,41 @@ Every reference run — command, verdict, op counts, evidence excerpts —
 is recorded in [`docs/RUNS.md`](docs/RUNS.md). Nothing in this README is
 a claim the ledger does not back.
 
+## Provenance, and what is on offer
+
+This repository was produced by **one human owner directing AI agent
+sessions** (Anthropic Claude, running in Claude Code; each commit's
+`Co-Authored-By` trailer names the model that co-wrote it). The
+process is specified in [`docs/PROCESS.md`](docs/PROCESS.md) and its
+full record is in the repository: a coordinator session wrote a brief
+per job; a fresh worker session implemented exactly that job; each of
+the twelve implementation jobs (M0–M5) was then verified by an
+**independent reviewer session** — reproducing runs and reading code,
+with authority to demand revisions, which was used (the review record
+includes REVISE rounds, one of which caught an outcome-classification
+unsoundness that would have convicted a healthy cluster, and its fix).
+The later documentation and publication jobs (13–15) merged without a
+separate review, as their briefs and PROCESS.md's standing-jobs
+provision record. The human owner
+assigned every session, arbitrated, dispatched the published CI
+sweeps, and holds final authority throughout.
+
+The published evidence is designed not to require trust in any of
+that: reference runs' verdicts, histories, and evidence excerpts are
+committed under [`results/`](results/README.md), most rows link their
+public CI job, and every CI sweep re-runs a red gate proving the
+harness still convicts a seeded bug.
+
+**What is being offered** *(scope statement drafted 2026-08-07; the
+owner will finalize the wording at offer time)*: the harness, the
+containerized environment, the `ratis-kv` SUT, the documentation, and
+the published `results/` — the complete working artifact. The internal
+process record (`jobs/`, `reviews/`: briefs, worker reports, and
+review reports, currently more lines than the code itself) documents
+how every decision was made and every finding was verified; it is
+offered as engineering history and can be kept, trimmed, or archived
+at the receiving project's preference.
+
 ## What it tests, and how
 
 **Workloads** (`--workload`):
@@ -105,8 +140,13 @@ off: no mount, no lazyfs process.
 ## Quickstart
 
 Requires Docker with the compose plugin (and, for the durability
-scenarios, an x86_64 host — see *Known limits*). From the repository
-root:
+scenarios, an x86_64 host — see *Known limits*). Behind a
+TLS-inspecting proxy (corporate/CI egress), first point
+`RJ_EXTRA_CA_BUNDLE` at your proxy's CA certificate(s) — otherwise the
+image build fails partway with a raw `git`/TLS
+certificate-verification error; the knob, its preflight checks, and
+its limits are documented in [`env/README.md`](env/README.md). From
+the repository root:
 
 ```sh
 env/run.sh up                                     # image + control & n1..n7, await ssh
@@ -154,8 +194,9 @@ The default scenario list is
 `counter-<kind>` tokens run the counter workload, `mv-<kind>` and
 `rolling-upgrade` the mixed-version topologies, and the durability
 tokens (`unsync-drop`, `unsync-drop-all`, `torn-write`,
-`counter-unsync-drop`) are opt-in because building lazyfs costs every
-runner ~2 minutes.
+`counter-unsync-drop`) are opt-in: they are not part of the default
+gate set, need an amd64 runner (the image's lazyfs build stage is
+amd64-only), and add per-node lazyfs mount setup and proof to the run.
 
 Every sweep also runs a **red-gate** job — a short seeded-bug run that
 passes only if the harness *fails* it, with a `:valid? false` in a
@@ -226,8 +267,22 @@ is.
   demonstrate it** (lazyfs passes renames through); it would need a
   dm-flakey/CrashMonkey-style follow-up.
 
-No upstream issues have been filed against Ratis from this work. Two
-bugs *were* filed against lazyfs
+Upstream filing status, precisely: **one Ratis issue has been filed
+and fixed from this line of work** —
+[RATIS-2640](https://issues.apache.org/jira/browse/RATIS-2640)
+(`AdminApi.setConfiguration(RaftPeer[], RaftPeer[])` drops the servers
+array and always throws), found during the library evaluation that
+preceded this harness and filed by this repository's owner on
+2026-08-04, fix submitted alongside it
+([apache/ratis#1543](https://github.com/apache/ratis/pull/1543),
+merged the same day). It is fixed on master but not in 3.2.2, so the
+harness's membership nemesis still works around it (the `Arguments`
+builder, never the two-array overload). The four findings *above*, by
+contrast, have **not** been filed upstream as of 2026-08-07; their
+classifications and the intended upstream actions are recorded in
+[`docs/BACKLOG.md`](docs/BACKLOG.md) (items 7–10); filing them is in
+the owner's hands. Two bugs *were* filed
+against lazyfs
 ([#15](https://github.com/dsrhaslab/lazyfs/issues/15),
 [#16](https://github.com/dsrhaslab/lazyfs/issues/16)) while building M4.
 
@@ -269,6 +324,7 @@ bugs *were* filed against lazyfs
 
 ## License
 
-Apache-2.0. Source files carry the license header. The harness is written
-from scratch; prior art (notably sofa-jraft-jepsen) was studied for shape
-only, not copied.
+Apache-2.0 — the full text is in [`LICENSE`](LICENSE), attribution and
+prior-art credit in [`NOTICE`](NOTICE). Source files carry the license
+header. The harness is written from scratch; prior art (notably
+sofa-jraft-jepsen) was studied for shape only, not copied.
