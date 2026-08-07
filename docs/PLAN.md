@@ -352,7 +352,10 @@ ledger labels it RC2 everywhere. All six milestones M0–M5 are now
 merged. Two things §5 left implicit remain undone and unscheduled: the
 elle migration (still knossos; BACKLOG 13) and the RocksDB state
 machine (Q4's later stage). The upstream question of §2.3 is still
-open — nothing has been filed against Ratis; step 4 below is the next
+open for this harness's findings — none of BACKLOG 7–10 has been filed
+against Ratis; the one Ratis filing so far (RATIS-2640 with its merged
+fix apache/ratis#1543, §8) came from the preceding evaluation work,
+not from the harness. Step 4 below is the next
 decision, now with the working artifact it asked for.)*
 
 *(updated 2026-08-06 (later): **M3 complete** — job 09 merged: exactly-once held under leader-kill churn at the default window; Q14 boundary demonstrated red only past it (quorum-pause nemesis; hazard is timeout-shaped, pre-step-down slice). **M4 complete** — job 11 merged: storage-durability faults

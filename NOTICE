@@ -1,0 +1,19 @@
+ratis-jepsen
+Copyright 2026 the ratis-jepsen authors.
+
+This repository contains no third-party source code: the harness, the
+ratis-kv system under test, the environment, and the documentation were
+written from scratch for this project and are licensed under the Apache
+License, Version 2.0 (see LICENSE).
+
+Prior art credit (studied for shape only — topology, nemesis set, CI
+shape; no code was copied):
+
+  sofa-jraft-jepsen (https://github.com/sofastack/sofa-jraft-jepsen),
+  Apache License 2.0.
+
+Third-party software this project depends on is fetched at build or
+run time and is not redistributed in this repository. It includes
+Apache Ratis (Apache License 2.0), Jepsen and knossos (Eclipse Public
+License 1.0), Clojure (Eclipse Public License 1.0), and lazyfs (MIT
+License, Copyright (C) 2023 INESC TEC), each under its own license.

@@ -132,7 +132,8 @@ binding on every document in this repository.*
    pre-flight check; `trap`-based failure summary in `validate.sh`;
    README note on the `maven-repo` volume lifecycle. Batch into an env
    polish job before or alongside M1 CI wiring.
-15. **No `LICENSE` or `NOTICE` file at the repository root.** Raised as
+15. **[CLOSED — Job 16 (2026-08-07) added both files] No `LICENSE` or
+   `NOTICE` file at the repository root.** Raised as
    an out-of-scope suggestion by Job 06 (2026-08-05) and still open at
    2026-08-07. Every source file carries the Apache-2.0 header and
    `README.md` states the license, but PLAN Q17 called for an
@@ -140,4 +141,8 @@ binding on every document in this repository.*
    the studied prior art — and the repository is public with an ASF
    donation as the stated endgame. Coordinator-level fix (no job owns
    the repository root); re-reported by Job 13, which is
-   documentation-only and could not add it.
+   documentation-only and could not add it; re-reported again as
+   required item 2 of the Job 15 capstone, and executed by Job 16
+   (canonical Apache-2.0 `LICENSE`; `NOTICE` with project attribution,
+   the sofa-jraft-jepsen shape-only prior-art credit, and the
+   fetched-not-redistributed dependency note).
