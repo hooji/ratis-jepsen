@@ -91,11 +91,13 @@ coordinator turns these into jobs when their milestone arrives.*
     unparseable recovered term or failed victim restart as a finding)
     before quoting the experiment externally. Until then the correct
     phrasing is "source-proven; probe-consistent".
-12. **lazyfs defects (upstream candidates for that project):** at the
-    pinned commit, fifo torn-write ops carrying `occurrence=` are
-    silently ignored (two defects characterized in Job 11's report,
-    verified live). Worth reporting to dsrhaslab/lazyfs as a courtesy
-    when we engage upstream anywhere.
+12. **lazyfs defects — FILED 2026-08-06** (dsrhaslab/lazyfs
+    [#15](https://github.com/dsrhaslab/lazyfs/issues/15): fifo
+    `torn-op` silently dropped when `occurrence=` is supplied;
+    [#16](https://github.com/dsrhaslab/lazyfs/issues/16): dropped fifo
+    commands still log `configured successfully`). Characterized in
+    Job 11's report; we offered to test a patch. No action pending on
+    our side.
 13. **Checker-cost variance / elle migration (Review 11 finding 4):**
     the same whole-cluster shape analyzed in 8.2 s on one host and
     17 s on another — the margin to the checker's practical limit
