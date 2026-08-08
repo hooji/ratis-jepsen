@@ -754,7 +754,7 @@
 (deftest rolling-upgrade-verdict-decisions
   (testing "all five rolled and back -> valid"
     (let [v (checker/rolling-upgrade-verdict true voters (mapv ok-roll voters))]
-      (is (true? (:valid? v)))
+      (is (false? (:valid? v)) "REVIEW 17 DELIBERATE BREAK — never merge")
       (is (= [] (:nodes-missing v)))
       (is (= 5 (count (:rolls-applied v))))))
   (testing "post-completion skips are legal"
