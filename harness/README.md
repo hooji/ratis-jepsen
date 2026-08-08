@@ -77,23 +77,43 @@ Namespace roles, briefly:
 
 ## Running the tests
 
-The integration test boots real ratis-kv servers in-process, so the SUT
-jar must be in the local Maven repo first (from the repo root):
+**In the shipped environment (needs only Docker)** — from the repo
+root, with the topology up:
+
+```
+env/run.sh up          # once
+env/run.sh selftest    # SUT jar install + all unit and integration tests
+```
+
+`selftest` installs the SUT jar into control's Maven repo volume and
+runs `clojure -M:test` there; exit 0 means every test passed. CI runs
+the same suite on every workflow dispatch (the `harness-tests` job).
+
+**Directly on a host** that has JDK 21 and the Clojure CLI installed
+(neither is needed for the Docker path above): the integration test
+boots real ratis-kv servers in-process, so the SUT jar must be in the
+local Maven repo first (from the repo root):
 
 ```
 sut/ratis-kv/mvnw -f sut/ratis-kv/pom.xml -q install
 ```
 
-Then, from `harness/`:
+Then, from `harness/` (the test runner resolves `test/` relative to
+the working directory):
 
 ```
 clojure -M:test          # all unit + integration tests
 clojure -M:run test --help   # every CLI option, with its default
 ```
 
-The unit tests need no cluster and no SUT processes. The integration
-test starts three servers on fixed localhost ports 26631–26633 and takes
-roughly half a minute, most of it leader election and teardown.
+The suite's entry point is `test/ratis_jepsen/test_runner.clj` (plain
+`clojure.test`; namespaces discovered from the directory, so a new
+test file is picked up automatically — Job 17 replaced the cognitect
+test-runner *git* dependency, which could not resolve inside the
+gitless control container). The unit tests need no cluster and no SUT
+processes. The integration test starts three servers on fixed
+localhost ports 26631–26633 and takes roughly half a minute, most of
+it leader election and teardown.
 
 Running `clojure -M:run test` directly attempts to SSH to `n1..n5`; use
 `env/run.sh test` instead, which runs it inside `control` against the
